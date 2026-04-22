@@ -1,0 +1,132 @@
+import { Hono } from 'hono'
+import { cors } from 'hono/cors'
+
+type Bindings = {
+  DB: D1Database
+}
+
+const app = new Hono<{ Bindings: Bindings }>()
+
+app.use(
+  '*',
+  cors({
+    origin: '*',
+    allowHeaders: ['Content-Type', 'Authorization'],
+    allowMethods: ['GET', 'POST', 'PUT', 'OPTIONS'],
+  })
+)
+
+app.get('/', (c) => {
+  return c.json({
+    ok: true,
+    service: 'trAIning API',
+    version: '0.1.0',
+  })
+})
+
+app.get('/health', async (c) => {
+  const dbOk = await c.env.DB.prepare('select 1 as ok').first().catch(() => null)
+
+  return c.json({
+    ok: true,
+    db: Boolean(dbOk),
+  })
+})
+
+app.post('/api/setup', async (c) => {
+  const statements = schemaSql
+    .split(';')
+    .map((s) => s.trim())
+    .filter(Boolean)
+
+  for (const statement of statements) {
+    await c.env.DB.prepare(statement).run()
+  }
+
+  return c.json({
+    ok: true,
+    message: 'Schema created',
+  })
+})
+
+const schemaSql = `
+create table if not exists users (
+  id text primary key,
+  email text not null unique,
+  name text not null,
+  created_at text not null,
+  last_login_at text
+);
+
+create table if not exists athlete_profiles (
+  id text primary key,
+  user_id text not null,
+  experience_level text not null,
+  weekly_days_available integer not null,
+  current_weekly_volume real not null,
+  preferred_goal_type text not null,
+  notes text,
+  created_at text not null
+);
+
+create table if not exists goals (
+  id text primary key,
+  user_id text not null,
+  goal_type text not null,
+  target_distance text not null,
+  target_event_name text,
+  target_event_date text,
+  status text not null,
+  created_at text not null
+);
+
+create table if not exists subscriptions (
+  id text primary key,
+  user_id text not null,
+  plan_code text not null,
+  billing_cycle text not null,
+  status text not null,
+  started_at text not null,
+  expires_at text
+);
+
+create table if not exists training_plans (
+  id text primary key,
+  user_id text not null,
+  version integer not null,
+  status text not null,
+  start_date text,
+  end_date text,
+  plan_summary text,
+  generation_source text,
+  created_at text not null
+);
+
+create table if not exists training_weeks (
+  id text primary key,
+  training_plan_id text not null,
+  week_number integer not null,
+  focus_label text,
+  total_target_distance real,
+  notes text
+);
+
+create table if not exists training_sessions (
+  id text primary key,
+  training_week_id text not null,
+  day_of_week text,
+  session_type text,
+  title text not null,
+  objective text,
+  distance_target real,
+  duration_target integer,
+  intensity_zone text,
+  warmup_text text,
+  main_set_text text,
+  cooldown_text text,
+  estimated_load integer,
+  status text not null
+);
+`
+
+export default app

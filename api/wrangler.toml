@@ -1,0 +1,8 @@
+name = "training-api"
+main = "src/index.ts"
+compatibility_date = "2025-04-22"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "training-db"
+database_id = "36fd2a36-aa7e-4784-a1c5-37e3a5f47497"
