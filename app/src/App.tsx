@@ -11,7 +11,7 @@ export default function App() {
         fontFamily: "Arial, sans-serif",
       }}
     >
-      <h1>trAIning ya está corriendo</h1>
+      <h1>trAIning conectado con cloudfare</h1>
     </div>
   );
 }
