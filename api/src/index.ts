@@ -62,7 +62,7 @@ app.get('/', (c) => {
   return c.json({
     ok: true,
     service: 'trAIning API',
-    version: '0.3.0',
+    version: '0.4.0',
   })
 })
 
@@ -167,6 +167,38 @@ app.post('/api/onboarding', async (c) => {
       profileId,
       goalId,
       message: 'Onboarding saved',
+    })
+  } catch (error) {
+    return c.json(
+      {
+        ok: false,
+        error: error instanceof Error ? error.message : 'Internal Server Error',
+      },
+      500
+    )
+  }
+})
+
+app.post('/api/user/find', async (c) => {
+  try {
+    const body = (await c.req.json()) as { email?: string }
+
+    if (!body.email?.trim()) {
+      return c.json({ ok: false, error: 'Email es requerido' }, 400)
+    }
+
+    const user = await c.env.DB
+      .prepare(`select id, email, name from users where email = ?1 limit 1`)
+      .bind(body.email.toLowerCase())
+      .first()
+
+    if (!user) {
+      return c.json({ ok: false, error: 'Usuario no encontrado' }, 404)
+    }
+
+    return c.json({
+      ok: true,
+      user,
     })
   } catch (error) {
     return c.json(
