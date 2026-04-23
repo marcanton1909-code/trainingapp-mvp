@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 const API_URL = "https://trainingapp-api.marco-cruz.workers.dev";
 
@@ -29,6 +29,7 @@ type TabMode = "new" | "existing";
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<TabMode>("new");
+  const [isMobile, setIsMobile] = useState(false);
 
   const [form, setForm] = useState({
     name: "",
@@ -50,6 +51,13 @@ export default function App() {
   const [lookupEmail, setLookupEmail] = useState("");
 
   const [selectedSession, setSelectedSession] = useState<Session | null>(null);
+
+  useEffect(() => {
+    const update = () => setIsMobile(window.innerWidth < 960);
+    update();
+    window.addEventListener("resize", update);
+    return () => window.removeEventListener("resize", update);
+  }, []);
 
   const totalWeeks = weeks.length;
   const totalSessions = weeks.reduce((acc, week) => acc + week.sessions.length, 0);
@@ -181,8 +189,22 @@ export default function App() {
       <div style={glowTwo} />
       <div style={glowThree} />
 
-      <div style={wrapperStyle}>
-        <aside style={brandPanelStyle}>
+      <div
+        style={{
+          ...wrapperStyle,
+          gridTemplateColumns: isMobile ? "1fr" : "0.95fr 1.05fr",
+          gap: isMobile ? 18 : 28,
+          maxWidth: isMobile ? 640 : 1280,
+        }}
+      >
+        <aside
+          style={{
+            ...brandPanelStyle,
+            minHeight: isMobile ? "auto" : 760,
+            padding: isMobile ? 22 : 36,
+            order: isMobile ? 2 : 1,
+          }}
+        >
           <div>
             <div style={logoRowStyle}>
               <div style={logoBoxStyle}>trAIning</div>
@@ -190,16 +212,33 @@ export default function App() {
             </div>
 
             <p style={eyebrowStyle}>ENTRENA INTELIGENTE</p>
-            <h1 style={titleStyle}>
+            <h1
+              style={{
+                ...titleStyle,
+                fontSize: isMobile ? 34 : 48,
+                maxWidth: "100%",
+              }}
+            >
               Un plan claro, adaptable y listo para seguir desde el primer día.
             </h1>
-            <p style={subtitleStyle}>
+            <p
+              style={{
+                ...subtitleStyle,
+                maxWidth: "100%",
+                fontSize: isMobile ? 15 : 16,
+              }}
+            >
               Crea un plan nuevo o consulta uno existente. Todo en una
               experiencia más cercana a una app real.
             </p>
           </div>
 
-          <div style={featureGridStyle}>
+          <div
+            style={{
+              ...featureGridStyle,
+              gridTemplateColumns: isMobile ? "1fr 1fr" : "repeat(2, minmax(0, 1fr))",
+            }}
+          >
             <div style={featureCardStyle}>
               <span style={featureLabelStyle}>Objetivos</span>
               <strong style={featureValueStyle}>5K · 10K · 21K · 42K</strong>
@@ -218,7 +257,12 @@ export default function App() {
             </div>
           </div>
 
-          <div style={statsRowStyle}>
+          <div
+            style={{
+              ...statsRowStyle,
+              gridTemplateColumns: isMobile ? "1fr 1fr 1fr" : "repeat(3, minmax(0, 1fr))",
+            }}
+          >
             <div style={statCardStyle}>
               <div style={statValueStyle}>{totalWeeks || "--"}</div>
               <div style={statLabelStyle}>Semanas visibles</div>
@@ -236,8 +280,20 @@ export default function App() {
           </div>
         </aside>
 
-        <main style={mainPanelStyle}>
-          <div style={tabsWrapStyle}>
+        <main
+          style={{
+            ...mainPanelStyle,
+            order: isMobile ? 1 : 2,
+          }}
+        >
+          <div
+            style={{
+              ...tabsWrapStyle,
+              width: isMobile ? "100%" : "fit-content",
+              display: isMobile ? "grid" : "inline-flex",
+              gridTemplateColumns: isMobile ? "1fr 1fr" : undefined,
+            }}
+          >
             <button
               onClick={() => setActiveTab("new")}
               style={{
@@ -259,10 +315,12 @@ export default function App() {
           </div>
 
           {activeTab === "new" && (
-            <section style={cardStyle}>
+            <section style={{ ...cardStyle, padding: isMobile ? 20 : 32 }}>
               <div style={sectionHeaderStyle}>
                 <span style={badgeStyle}>Comienza hoy</span>
-                <h2 style={formTitleStyle}>Crear perfil y generar plan</h2>
+                <h2 style={{ ...formTitleStyle, fontSize: isMobile ? 26 : 32 }}>
+                  Crear perfil y generar plan
+                </h2>
                 <p style={formTextStyle}>
                   Captura tu información base y genera tu plan inicial de forma
                   automática.
@@ -295,7 +353,12 @@ export default function App() {
                   />
                 </div>
 
-                <div style={twoColsStyle}>
+                <div
+                  style={{
+                    ...twoColsStyle,
+                    gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr",
+                  }}
+                >
                   <div style={fieldGroupStyle}>
                     <label style={labelStyle}>Objetivo</label>
                     <select
@@ -326,7 +389,12 @@ export default function App() {
                   </div>
                 </div>
 
-                <div style={twoColsStyle}>
+                <div
+                  style={{
+                    ...twoColsStyle,
+                    gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr",
+                  }}
+                >
                   <div style={fieldGroupStyle}>
                     <label style={labelStyle}>Días por semana</label>
                     <input
@@ -399,10 +467,12 @@ export default function App() {
           )}
 
           {activeTab === "existing" && (
-            <section style={cardStyle}>
+            <section style={{ ...cardStyle, padding: isMobile ? 20 : 32 }}>
               <div style={sectionHeaderStyle}>
                 <span style={badgeStyle}>Consultar</span>
-                <h2 style={formTitleStyle}>Cargar plan existente</h2>
+                <h2 style={{ ...formTitleStyle, fontSize: isMobile ? 26 : 32 }}>
+                  Cargar plan existente
+                </h2>
                 <p style={formTextStyle}>
                   Usa el correo registrado para consultar el plan guardado.
                 </p>
@@ -436,14 +506,26 @@ export default function App() {
 
           {weeks.length > 0 && (
             <section style={planContainerStyle}>
-              <div style={planTopBarStyle}>
+              <div
+                style={{
+                  ...planTopBarStyle,
+                  alignItems: isMobile ? "start" : "end",
+                  flexDirection: isMobile ? "column" : "row",
+                }}
+              >
                 <h3 style={planTitleStyle}>Tu plan inicial</h3>
                 <div style={planHintStyle}>Selecciona una sesión para verla a detalle</div>
               </div>
 
               {weeks.map((week) => (
                 <div key={week.week_number} style={weekCardStyle}>
-                  <div style={weekHeaderStyle}>
+                  <div
+                    style={{
+                      ...weekHeaderStyle,
+                      alignItems: isMobile ? "start" : "center",
+                      flexDirection: isMobile ? "column" : "row",
+                    }}
+                  >
                     <div>
                       <div style={weekLabelStyle}>Semana {week.week_number}</div>
                       <div style={weekFocusStyle}>
@@ -499,13 +581,22 @@ export default function App() {
 
       {selectedSession && (
         <div style={modalOverlayStyle} onClick={() => setSelectedSession(null)}>
-          <div style={modalCardStyle} onClick={(e) => e.stopPropagation()}>
+          <div
+            style={{
+              ...modalCardStyle,
+              maxWidth: isMobile ? "100%" : 640,
+              padding: isMobile ? 18 : 24,
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
             <div style={modalHeaderStyle}>
               <div>
                 <div style={modalEyebrowStyle}>
                   {selectedSession.day_of_week || "Sesión"}
                 </div>
-                <h3 style={modalTitleStyle}>{selectedSession.title}</h3>
+                <h3 style={{ ...modalTitleStyle, fontSize: isMobile ? 24 : 28 }}>
+                  {selectedSession.title}
+                </h3>
               </div>
               <button
                 onClick={() => setSelectedSession(null)}
@@ -627,7 +718,6 @@ const wrapperStyle: React.CSSProperties = {
   maxWidth: 1280,
   margin: "0 auto",
   display: "grid",
-  gridTemplateColumns: "0.95fr 1.05fr",
   gap: 28,
   position: "relative",
   zIndex: 1,
@@ -640,7 +730,6 @@ const brandPanelStyle: React.CSSProperties = {
   border: "1px solid rgba(255,255,255,0.08)",
   borderRadius: 32,
   padding: 36,
-  minHeight: 760,
   display: "flex",
   flexDirection: "column",
   justifyContent: "space-between",
@@ -691,23 +780,18 @@ const eyebrowStyle: React.CSSProperties = {
 };
 
 const titleStyle: React.CSSProperties = {
-  fontSize: 48,
   lineHeight: 1.02,
   margin: 0,
-  maxWidth: 560,
 };
 
 const subtitleStyle: React.CSSProperties = {
   marginTop: 18,
-  maxWidth: 560,
   color: "rgba(255,255,255,0.68)",
   lineHeight: 1.7,
-  fontSize: 16,
 };
 
 const featureGridStyle: React.CSSProperties = {
   display: "grid",
-  gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
   gap: 14,
   marginTop: 32,
 };
@@ -734,7 +818,6 @@ const featureValueStyle: React.CSSProperties = {
 
 const statsRowStyle: React.CSSProperties = {
   display: "grid",
-  gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
   gap: 12,
   marginTop: 28,
 };
@@ -764,14 +847,12 @@ const mainPanelStyle: React.CSSProperties = {
 };
 
 const tabsWrapStyle: React.CSSProperties = {
-  display: "inline-flex",
   gap: 10,
   alignItems: "center",
   background: "rgba(255,255,255,0.04)",
   border: "1px solid rgba(255,255,255,0.08)",
   borderRadius: 18,
   padding: 8,
-  width: "fit-content",
 };
 
 const tabButtonStyle: React.CSSProperties = {
@@ -794,7 +875,6 @@ const cardStyle: React.CSSProperties = {
     "linear-gradient(180deg, rgba(17,22,29,0.98), rgba(11,15,20,0.96))",
   border: "1px solid rgba(255,255,255,0.08)",
   borderRadius: 32,
-  padding: 32,
   boxShadow: "0 24px 80px rgba(0,0,0,0.42)",
   backdropFilter: "blur(12px)",
 };
@@ -812,7 +892,6 @@ const badgeStyle: React.CSSProperties = {
 
 const formTitleStyle: React.CSSProperties = {
   margin: 0,
-  fontSize: 32,
 };
 
 const formTextStyle: React.CSSProperties = {
@@ -832,7 +911,6 @@ const formStyle: React.CSSProperties = {
 
 const twoColsStyle: React.CSSProperties = {
   display: "grid",
-  gridTemplateColumns: "1fr 1fr",
   gap: 12,
 };
 
@@ -900,8 +978,6 @@ const planContainerStyle: React.CSSProperties = {
 
 const planTopBarStyle: React.CSSProperties = {
   display: "flex",
-  justifyContent: "space-between",
-  alignItems: "end",
   gap: 16,
   flexWrap: "wrap",
 };
@@ -927,8 +1003,6 @@ const weekCardStyle: React.CSSProperties = {
 
 const weekHeaderStyle: React.CSSProperties = {
   display: "flex",
-  justifyContent: "space-between",
-  alignItems: "center",
   gap: 12,
   marginBottom: 14,
 };
@@ -1015,11 +1089,9 @@ const modalOverlayStyle: React.CSSProperties = {
 
 const modalCardStyle: React.CSSProperties = {
   width: "100%",
-  maxWidth: 640,
   background: "linear-gradient(180deg, #11161D 0%, #0B0F14 100%)",
   border: "1px solid rgba(255,255,255,0.08)",
   borderRadius: 28,
-  padding: 24,
   boxShadow: "0 24px 80px rgba(0,0,0,0.5)",
 };
 
@@ -1039,7 +1111,6 @@ const modalEyebrowStyle: React.CSSProperties = {
 
 const modalTitleStyle: React.CSSProperties = {
   margin: 0,
-  fontSize: 28,
 };
 
 const closeButtonStyle: React.CSSProperties = {
