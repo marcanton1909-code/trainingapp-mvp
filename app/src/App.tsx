@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useState } from "react";
 
 const API_URL = "https://trainingapp-api.marco-cruz.workers.dev";
 
@@ -47,20 +47,15 @@ export default function App() {
 
   const [result, setResult] = useState("");
   const [weeks, setWeeks] = useState<Week[]>([]);
-  const [userId, setUserId] = useState("");
   const [lookupEmail, setLookupEmail] = useState("");
 
   const [selectedSession, setSelectedSession] = useState<Session | null>(null);
 
   const totalWeeks = weeks.length;
-  const totalSessions = useMemo(
-    () => weeks.reduce((acc, week) => acc + week.sessions.length, 0),
-    [weeks]
-  );
-  const totalDistance = useMemo(
-    () =>
-      weeks.reduce((acc, week) => acc + Number(week.total_target_distance || 0), 0),
-    [weeks]
+  const totalSessions = weeks.reduce((acc, week) => acc + week.sessions.length, 0);
+  const totalDistance = weeks.reduce(
+    (acc, week) => acc + Number(week.total_target_distance || 0),
+    0
   );
 
   const handleChange = (
@@ -80,7 +75,6 @@ export default function App() {
   const resetPlanState = () => {
     setResult("");
     setWeeks([]);
-    setUserId("");
     setSelectedSession(null);
   };
 
@@ -116,7 +110,6 @@ export default function App() {
       }
 
       const newUserId = onboardingData.userId;
-      setUserId(newUserId);
 
       const planRes = await fetch(`${API_URL}/api/plan/generate`, {
         method: "POST",
@@ -169,7 +162,6 @@ export default function App() {
       }
 
       const existingUserId = userData.user.id;
-      setUserId(existingUserId);
 
       await fetchPlan(existingUserId);
       setResult(`Plan cargado correctamente para ${userData.user.email}.`);
@@ -805,10 +797,6 @@ const cardStyle: React.CSSProperties = {
   padding: 32,
   boxShadow: "0 24px 80px rgba(0,0,0,0.42)",
   backdropFilter: "blur(12px)",
-};
-
-const formHeaderStyle: React.CSSProperties = {
-  marginBottom: 24,
 };
 
 const badgeStyle: React.CSSProperties = {
