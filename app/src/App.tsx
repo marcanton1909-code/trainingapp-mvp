@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 const API_URL = "https://trainingapp-api.marco-cruz.workers.dev";
 
@@ -25,10 +25,10 @@ type Week = {
   sessions: Session[];
 };
 
-type TabMode = "new" | "existing";
+type TabMode = "home" | "new" | "existing";
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<TabMode>("new");
+  const [activeTab, setActiveTab] = useState<TabMode>("home");
   const [isMobile, setIsMobile] = useState(false);
 
   const [form, setForm] = useState({
@@ -49,7 +49,6 @@ export default function App() {
   const [result, setResult] = useState("");
   const [weeks, setWeeks] = useState<Week[]>([]);
   const [lookupEmail, setLookupEmail] = useState("");
-
   const [selectedSession, setSelectedSession] = useState<Session | null>(null);
 
   useEffect(() => {
@@ -59,12 +58,36 @@ export default function App() {
     return () => window.removeEventListener("resize", update);
   }, []);
 
-  const totalWeeks = weeks.length;
-  const totalSessions = weeks.reduce((acc, week) => acc + week.sessions.length, 0);
-  const totalDistance = weeks.reduce(
-    (acc, week) => acc + Number(week.total_target_distance || 0),
-    0
+  const visibleWeek = useMemo(() => {
+    return weeks.length > 0 ? weeks[0] : null;
+  }, [weeks]);
+
+  const visibleWeeks = useMemo(() => {
+    return visibleWeek ? [visibleWeek] : [];
+  }, [visibleWeek]);
+
+  const totalWeeks = visibleWeeks.length;
+  const totalSessions = useMemo(
+    () => visibleWeeks.reduce((acc, week) => acc + week.sessions.length, 0),
+    [visibleWeeks]
   );
+  const totalDistance = useMemo(
+    () =>
+      visibleWeeks.reduce(
+        (acc, week) => acc + Number(week.total_target_distance || 0),
+        0
+      ),
+    [visibleWeeks]
+  );
+
+  const allSessions = useMemo(
+    () => visibleWeeks.flatMap((week) => week.sessions),
+    [visibleWeeks]
+  );
+
+  const todaysSession = allSessions[0] || null;
+  const readinessScore = visibleWeeks.length > 0 ? 82 : 0;
+  const recoveryScore = visibleWeeks.length > 0 ? 76 : 0;
 
   const handleChange = (
     e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>
@@ -137,8 +160,8 @@ export default function App() {
       }
 
       await fetchPlan(newUserId);
-      setResult("Tu perfil fue guardado y tu plan inicial ya está listo.");
-      setActiveTab("existing");
+      setResult("Tu perfil fue guardado y tu primera semana ya está lista.");
+      setActiveTab("home");
       setLookupEmail(form.email);
     } catch (error) {
       setResult(
@@ -173,6 +196,7 @@ export default function App() {
 
       await fetchPlan(existingUserId);
       setResult(`Plan cargado correctamente para ${userData.user.email}.`);
+      setActiveTab("home");
     } catch (error) {
       setResult(
         error instanceof Error ? error.message : "Ocurrió un error inesperado"
@@ -219,7 +243,7 @@ export default function App() {
                 maxWidth: "100%",
               }}
             >
-              Un plan claro, adaptable y listo para seguir desde el primer día.
+              Entrena con estructura, claridad y una vista real de tu progreso.
             </h1>
             <p
               style={{
@@ -228,8 +252,8 @@ export default function App() {
                 fontSize: isMobile ? 15 : 16,
               }}
             >
-              Crea un plan nuevo o consulta uno existente. Todo en una
-              experiencia más cercana a una app real.
+              Tu dashboard te muestra el estado actual, la sesión destacada y el
+              resumen de la semana activa.
             </p>
           </div>
 
@@ -248,8 +272,8 @@ export default function App() {
               <strong style={featureValueStyle}>Según tu meta</strong>
             </div>
             <div style={featureCardStyle}>
-              <span style={featureLabelStyle}>Bloques</span>
-              <strong style={featureValueStyle}>Semanas y sesiones</strong>
+              <span style={featureLabelStyle}>Vista</span>
+              <strong style={featureValueStyle}>Semana activa</strong>
             </div>
             <div style={featureCardStyle}>
               <span style={featureLabelStyle}>Consulta</span>
@@ -265,7 +289,7 @@ export default function App() {
           >
             <div style={statCardStyle}>
               <div style={statValueStyle}>{totalWeeks || "--"}</div>
-              <div style={statLabelStyle}>Semanas visibles</div>
+              <div style={statLabelStyle}>Semana visible</div>
             </div>
             <div style={statCardStyle}>
               <div style={statValueStyle}>{totalSessions || "--"}</div>
@@ -275,7 +299,7 @@ export default function App() {
               <div style={statValueStyle}>
                 {totalDistance ? `${totalDistance}k` : "--"}
               </div>
-              <div style={statLabelStyle}>Carga acumulada</div>
+              <div style={statLabelStyle}>Carga semanal</div>
             </div>
           </div>
         </aside>
@@ -291,9 +315,18 @@ export default function App() {
               ...tabsWrapStyle,
               width: isMobile ? "100%" : "fit-content",
               display: isMobile ? "grid" : "inline-flex",
-              gridTemplateColumns: isMobile ? "1fr 1fr" : undefined,
+              gridTemplateColumns: isMobile ? "1fr 1fr 1fr" : undefined,
             }}
           >
+            <button
+              onClick={() => setActiveTab("home")}
+              style={{
+                ...tabButtonStyle,
+                ...(activeTab === "home" ? activeTabButtonStyle : {}),
+              }}
+            >
+              Home
+            </button>
             <button
               onClick={() => setActiveTab("new")}
               style={{
@@ -314,6 +347,123 @@ export default function App() {
             </button>
           </div>
 
+          {activeTab === "home" && (
+            <section style={{ ...cardStyle, padding: isMobile ? 20 : 28 }}>
+              <div style={sectionHeaderStyle}>
+                <span style={badgeStyle}>Dashboard</span>
+                <h2 style={{ ...formTitleStyle, fontSize: isMobile ? 26 : 32 }}>
+                  Resumen de entrenamiento
+                </h2>
+                <p style={formTextStyle}>
+                  Una vista rápida de tu estado actual, tu próxima sesión y la carga de la semana disponible.
+                </p>
+              </div>
+
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: isMobile ? "1fr" : "1.2fr 0.8fr",
+                  gap: 16,
+                }}
+              >
+                <div style={heroCardStyle}>
+                  <div style={heroBadgeStyle}>Sesión del día</div>
+                  <div style={heroTitleStyle}>
+                    {todaysSession ? todaysSession.title : "Aún no hay plan cargado"}
+                  </div>
+                  <div style={heroMetaStyle}>
+                    {todaysSession?.day_of_week || "Crea o consulta un plan para comenzar"}
+                    {todaysSession?.distance_target
+                      ? ` · ${todaysSession.distance_target} km`
+                      : ""}
+                    {todaysSession?.duration_target
+                      ? ` · ${todaysSession.duration_target} min`
+                      : ""}
+                  </div>
+                  <div style={heroTextStyle}>
+                    {todaysSession?.objective ||
+                      "Aquí verás la sesión destacada de la semana visible."}
+                  </div>
+                  {todaysSession && (
+                    <button
+                      style={heroButtonStyle}
+                      onClick={() => setSelectedSession(todaysSession)}
+                    >
+                      Ver sesión
+                    </button>
+                  )}
+                </div>
+
+                <div style={miniStatsWrapStyle}>
+                  <div style={miniStatCardStyle}>
+                    <div style={miniStatLabelStyle}>Readiness</div>
+                    <div style={miniStatValueStyle}>
+                      {visibleWeeks.length > 0 ? `${readinessScore}%` : "--"}
+                    </div>
+                    <div style={miniStatHintStyle}>Listo para rendir</div>
+                  </div>
+                  <div style={miniStatCardStyle}>
+                    <div style={miniStatLabelStyle}>Recuperación</div>
+                    <div style={miniStatValueStyle}>
+                      {visibleWeeks.length > 0 ? `${recoveryScore}%` : "--"}
+                    </div>
+                    <div style={miniStatHintStyle}>Carga manejable</div>
+                  </div>
+                </div>
+              </div>
+
+              <div
+                style={{
+                  marginTop: 18,
+                  display: "grid",
+                  gridTemplateColumns: isMobile ? "1fr" : "repeat(3, minmax(0, 1fr))",
+                  gap: 12,
+                }}
+              >
+                <div style={summaryCardStyle}>
+                  <div style={summaryLabelStyle}>Semana activa</div>
+                  <div style={summaryValueStyle}>
+                    {visibleWeek ? `Semana ${visibleWeek.week_number}` : "--"}
+                  </div>
+                </div>
+                <div style={summaryCardStyle}>
+                  <div style={summaryLabelStyle}>Sesiones visibles</div>
+                  <div style={summaryValueStyle}>{totalSessions || "--"}</div>
+                </div>
+                <div style={summaryCardStyle}>
+                  <div style={summaryLabelStyle}>Carga total</div>
+                  <div style={summaryValueStyle}>
+                    {totalDistance ? `${totalDistance} km` : "--"}
+                  </div>
+                </div>
+              </div>
+
+              {visibleWeek && (
+                <div style={{ marginTop: 22 }}>
+                  <div style={planTopBarStyle}>
+                    <h3 style={planTitleStyle}>Semana disponible</h3>
+                    <div style={planHintStyle}>La siguiente fase se desbloquea después</div>
+                  </div>
+
+                  <div style={{ marginTop: 12 }}>
+                    <button
+                      style={homeWeekCardButtonStyle}
+                      onClick={() => setActiveTab("existing")}
+                    >
+                      <div style={weekLabelStyle}>Semana {visibleWeek.week_number}</div>
+                      <div style={weekFocusStyle}>
+                        {visibleWeek.focus_label || "Bloque de entrenamiento"}
+                      </div>
+                      <div style={weekDistanceStyle}>
+                        {visibleWeek.total_target_distance ?? 0} km
+                      </div>
+                    </button>
+                  </div>
+                </div>
+              )}
+            </section>
+          )}
+
           {activeTab === "new" && (
             <section style={{ ...cardStyle, padding: isMobile ? 20 : 32 }}>
               <div style={sectionHeaderStyle}>
@@ -322,8 +472,7 @@ export default function App() {
                   Crear perfil y generar plan
                 </h2>
                 <p style={formTextStyle}>
-                  Captura tu información base y genera tu plan inicial de forma
-                  automática.
+                  Captura tu información base y genera tu plan inicial.
                 </p>
               </div>
 
@@ -453,7 +602,7 @@ export default function App() {
                     type="date"
                     value={form.eventDate}
                     onChange={handleChange}
-                    style={inputStyle}
+                    style={{ ...inputStyle, colorScheme: "dark" }}
                   />
                 </div>
 
@@ -474,7 +623,7 @@ export default function App() {
                   Cargar plan existente
                 </h2>
                 <p style={formTextStyle}>
-                  Usa el correo registrado para consultar el plan guardado.
+                  Usa el correo registrado para consultar la semana disponible.
                 </p>
               </div>
 
@@ -499,83 +648,83 @@ export default function App() {
                   {lookupLoading ? "Buscando plan..." : "Buscar usuario y cargar plan"}
                 </button>
               </form>
+
+              {visibleWeeks.length > 0 && (
+                <section style={{ ...planContainerStyle, marginTop: 24 }}>
+                  <div
+                    style={{
+                      ...planTopBarStyle,
+                      alignItems: isMobile ? "start" : "end",
+                      flexDirection: isMobile ? "column" : "row",
+                    }}
+                  >
+                    <h3 style={planTitleStyle}>Tu semana actual</h3>
+                    <div style={planHintStyle}>Las siguientes semanas permanecen ocultas</div>
+                  </div>
+
+                  {visibleWeeks.map((week) => (
+                    <div key={week.week_number} style={weekCardStyle}>
+                      <div
+                        style={{
+                          ...weekHeaderStyle,
+                          alignItems: isMobile ? "start" : "center",
+                          flexDirection: isMobile ? "column" : "row",
+                        }}
+                      >
+                        <div>
+                          <div style={weekLabelStyle}>Semana {week.week_number}</div>
+                          <div style={weekFocusStyle}>
+                            {week.focus_label || "Bloque de entrenamiento"}
+                          </div>
+                        </div>
+                        <div style={weekDistanceStyle}>
+                          {week.total_target_distance ?? 0} km
+                        </div>
+                      </div>
+
+                      <div style={sessionsListStyle}>
+                        {week.sessions.map((session, index) => (
+                          <button
+                            key={index}
+                            onClick={() => setSelectedSession(session)}
+                            style={sessionCardButtonStyle}
+                          >
+                            <div style={sessionTopRowStyle}>
+                              <div style={sessionDayStyle}>
+                                {session.day_of_week || "Sesión"}
+                              </div>
+                              <div style={sessionZoneStyle}>
+                                {session.intensity_zone || "General"}
+                              </div>
+                            </div>
+
+                            <div style={sessionTitleStyle}>{session.title}</div>
+
+                            <div style={sessionMetaStyle}>
+                              {session.distance_target
+                                ? `${session.distance_target} km`
+                                : ""}
+                              {session.duration_target
+                                ? ` · ${session.duration_target} min`
+                                : ""}
+                            </div>
+
+                            {session.objective && (
+                              <div style={sessionObjectiveStyle}>
+                                {session.objective}
+                              </div>
+                            )}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </section>
+              )}
             </section>
           )}
 
           {result && <div style={resultStyle}>{result}</div>}
-
-          {weeks.length > 0 && (
-            <section style={planContainerStyle}>
-              <div
-                style={{
-                  ...planTopBarStyle,
-                  alignItems: isMobile ? "start" : "end",
-                  flexDirection: isMobile ? "column" : "row",
-                }}
-              >
-                <h3 style={planTitleStyle}>Tu plan inicial</h3>
-                <div style={planHintStyle}>Selecciona una sesión para verla a detalle</div>
-              </div>
-
-              {weeks.map((week) => (
-                <div key={week.week_number} style={weekCardStyle}>
-                  <div
-                    style={{
-                      ...weekHeaderStyle,
-                      alignItems: isMobile ? "start" : "center",
-                      flexDirection: isMobile ? "column" : "row",
-                    }}
-                  >
-                    <div>
-                      <div style={weekLabelStyle}>Semana {week.week_number}</div>
-                      <div style={weekFocusStyle}>
-                        {week.focus_label || "Bloque de entrenamiento"}
-                      </div>
-                    </div>
-                    <div style={weekDistanceStyle}>
-                      {week.total_target_distance ?? 0} km
-                    </div>
-                  </div>
-
-                  <div style={sessionsListStyle}>
-                    {week.sessions.map((session, index) => (
-                      <button
-                        key={index}
-                        onClick={() => setSelectedSession(session)}
-                        style={sessionCardButtonStyle}
-                      >
-                        <div style={sessionTopRowStyle}>
-                          <div style={sessionDayStyle}>
-                            {session.day_of_week || "Sesión"}
-                          </div>
-                          <div style={sessionZoneStyle}>
-                            {session.intensity_zone || "General"}
-                          </div>
-                        </div>
-
-                        <div style={sessionTitleStyle}>{session.title}</div>
-
-                        <div style={sessionMetaStyle}>
-                          {session.distance_target
-                            ? `${session.distance_target} km`
-                            : ""}
-                          {session.duration_target
-                            ? ` · ${session.duration_target} min`
-                            : ""}
-                        </div>
-
-                        {session.objective && (
-                          <div style={sessionObjectiveStyle}>
-                            {session.objective}
-                          </div>
-                        )}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              ))}
-            </section>
-          )}
         </main>
       </div>
 
@@ -971,6 +1120,109 @@ const resultStyle: React.CSSProperties = {
   border: "1px solid rgba(255,255,255,0.06)",
 };
 
+const heroCardStyle: React.CSSProperties = {
+  borderRadius: 24,
+  padding: 22,
+  background:
+    "linear-gradient(135deg, rgba(214,255,77,0.14), rgba(0,230,255,0.10) 60%, rgba(255,255,255,0.03))",
+  border: "1px solid rgba(255,255,255,0.08)",
+  minHeight: 220,
+  display: "flex",
+  flexDirection: "column",
+  justifyContent: "space-between",
+};
+
+const heroBadgeStyle: React.CSSProperties = {
+  display: "inline-block",
+  width: "fit-content",
+  padding: "8px 12px",
+  borderRadius: 999,
+  fontSize: 12,
+  fontWeight: 700,
+  background: "rgba(255,255,255,0.08)",
+  color: "#D6FF4D",
+};
+
+const heroTitleStyle: React.CSSProperties = {
+  fontSize: 30,
+  fontWeight: 800,
+  lineHeight: 1.05,
+  marginTop: 16,
+};
+
+const heroMetaStyle: React.CSSProperties = {
+  marginTop: 8,
+  color: "rgba(255,255,255,0.72)",
+  fontSize: 14,
+};
+
+const heroTextStyle: React.CSSProperties = {
+  marginTop: 12,
+  color: "rgba(255,255,255,0.88)",
+  lineHeight: 1.6,
+};
+
+const heroButtonStyle: React.CSSProperties = {
+  marginTop: 18,
+  background: "#D6FF4D",
+  color: "#000",
+  border: "none",
+  borderRadius: 14,
+  padding: "12px 14px",
+  fontWeight: 800,
+  cursor: "pointer",
+  width: "fit-content",
+};
+
+const miniStatsWrapStyle: React.CSSProperties = {
+  display: "grid",
+  gap: 12,
+};
+
+const miniStatCardStyle: React.CSSProperties = {
+  borderRadius: 20,
+  padding: 18,
+  border: "1px solid rgba(255,255,255,0.08)",
+  background: "rgba(255,255,255,0.03)",
+};
+
+const miniStatLabelStyle: React.CSSProperties = {
+  fontSize: 12,
+  color: "rgba(255,255,255,0.55)",
+};
+
+const miniStatValueStyle: React.CSSProperties = {
+  fontSize: 34,
+  fontWeight: 800,
+  color: "#D6FF4D",
+  marginTop: 8,
+};
+
+const miniStatHintStyle: React.CSSProperties = {
+  marginTop: 4,
+  fontSize: 13,
+  color: "rgba(255,255,255,0.72)",
+};
+
+const summaryCardStyle: React.CSSProperties = {
+  borderRadius: 18,
+  padding: 16,
+  border: "1px solid rgba(255,255,255,0.08)",
+  background: "rgba(255,255,255,0.03)",
+};
+
+const summaryLabelStyle: React.CSSProperties = {
+  fontSize: 12,
+  color: "rgba(255,255,255,0.55)",
+};
+
+const summaryValueStyle: React.CSSProperties = {
+  marginTop: 8,
+  fontSize: 24,
+  fontWeight: 800,
+  color: "#fff",
+};
+
 const planContainerStyle: React.CSSProperties = {
   display: "grid",
   gap: 16,
@@ -991,6 +1243,16 @@ const planTitleStyle: React.CSSProperties = {
 const planHintStyle: React.CSSProperties = {
   color: "rgba(255,255,255,0.55)",
   fontSize: 13,
+};
+
+const homeWeekCardButtonStyle: React.CSSProperties = {
+  textAlign: "left",
+  borderRadius: 18,
+  border: "1px solid rgba(255,255,255,0.08)",
+  background: "rgba(255,255,255,0.03)",
+  padding: 16,
+  color: "white",
+  cursor: "pointer",
 };
 
 const weekCardStyle: React.CSSProperties = {
