@@ -5,6 +5,19 @@ type Bindings = {
   DB: D1Database
 }
 
+type AthleteProfileInput = {
+  name: string
+  email: string
+  goal: string
+  distance: '5K' | '10K' | '21K' | '42K'
+  daysPerWeek: number
+  level: 'Principiante' | 'Intermedio' | 'Avanzado'
+  currentVolumeKm: number
+  eventName?: string
+  eventDate?: string
+  notes?: string
+}
+
 const app = new Hono<{ Bindings: Bindings }>()
 
 app.use(
@@ -20,7 +33,7 @@ app.get('/', (c) => {
   return c.json({
     ok: true,
     service: 'trAIning API',
-    version: '0.1.0',
+    version: '0.2.0',
   })
 })
 
@@ -48,6 +61,82 @@ app.post('/api/setup', async (c) => {
     message: 'Schema created',
   })
 })
+
+app.post('/api/onboarding', async (c) => {
+  const body = (await c.req.json()) as AthleteProfileInput
+
+  validateProfile(body)
+
+  const userId = crypto.randomUUID()
+  const profileId = crypto.randomUUID()
+  const goalId = crypto.randomUUID()
+  const createdAt = new Date().toISOString()
+
+  await c.env.DB.batch([
+    c.env.DB
+      .prepare(
+        `insert into users (id, email, name, created_at)
+         values (?1, ?2, ?3, ?4)`
+      )
+      .bind(userId, body.email.toLowerCase(), body.name, createdAt),
+
+    c.env.DB
+      .prepare(
+        `insert into athlete_profiles (
+          id, user_id, experience_level, weekly_days_available,
+          current_weekly_volume, preferred_goal_type, notes, created_at
+        ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)`
+      )
+      .bind(
+        profileId,
+        userId,
+        body.level,
+        body.daysPerWeek,
+        body.currentVolumeKm,
+        body.goal,
+        body.notes ?? '',
+        createdAt
+      ),
+
+    c.env.DB
+      .prepare(
+        `insert into goals (
+          id, user_id, goal_type, target_distance, target_event_name,
+          target_event_date, status, created_at
+        ) values (?1, ?2, ?3, ?4, ?5, ?6, 'active', ?7)`
+      )
+      .bind(
+        goalId,
+        userId,
+        body.goal,
+        body.distance,
+        body.eventName ?? null,
+        body.eventDate ?? null,
+        createdAt
+      ),
+  ])
+
+  return c.json({
+    ok: true,
+    userId,
+    profileId,
+    goalId,
+    message: 'Onboarding saved',
+  })
+})
+
+function validateProfile(input: AthleteProfileInput) {
+  if (!input.name?.trim()) throw new Error('Name is required')
+  if (!input.email?.trim()) throw new Error('Email is required')
+  if (!input.goal?.trim()) throw new Error('Goal is required')
+  if (!input.distance) throw new Error('Distance is required')
+  if (!input.daysPerWeek || input.daysPerWeek < 1 || input.daysPerWeek > 7) {
+    throw new Error('daysPerWeek must be between 1 and 7')
+  }
+  if (input.currentVolumeKm < 0) {
+    throw new Error('currentVolumeKm must be >= 0')
+  }
+}
 
 const schemaSql = `
 create table if not exists users (
