@@ -18,6 +18,35 @@ type AthleteProfileInput = {
   notes?: string
 }
 
+type GeneratePlanInput = AthleteProfileInput & {
+  userId: string
+}
+
+type TrainingSession = {
+  day: string
+  title: string
+  objective: string
+  distanceKm?: number
+  durationMin?: number
+  zone: string
+  warmup: string
+  mainSet: string
+  cooldown: string
+  estimatedLoad: number
+}
+
+type TrainingWeek = {
+  weekNumber: number
+  focus: string
+  targetDistanceKm: number
+  sessions: TrainingSession[]
+}
+
+type TrainingPlan = {
+  summary: string
+  weeks: TrainingWeek[]
+}
+
 const app = new Hono<{ Bindings: Bindings }>()
 
 app.use(
@@ -33,7 +62,7 @@ app.get('/', (c) => {
   return c.json({
     ok: true,
     service: 'trAIning API',
-    version: '0.2.0',
+    version: '0.3.0',
   })
 })
 
@@ -150,6 +179,176 @@ app.post('/api/onboarding', async (c) => {
   }
 })
 
+app.post('/api/plan/generate', async (c) => {
+  try {
+    const body = (await c.req.json()) as GeneratePlanInput
+
+    validateProfile(body)
+
+    if (!body.userId?.trim()) {
+      return c.json({ ok: false, error: 'userId es requerido' }, 400)
+    }
+
+    const existingUser = await c.env.DB
+      .prepare(`select id from users where id = ?1 limit 1`)
+      .bind(body.userId)
+      .first()
+
+    if (!existingUser) {
+      return c.json({ ok: false, error: 'Usuario no encontrado' }, 404)
+    }
+
+    const plan = generateFallbackPlan(body)
+    const planId = crypto.randomUUID()
+    const createdAt = new Date().toISOString()
+    const startDate = new Date().toISOString().slice(0, 10)
+
+    await c.env.DB
+      .prepare(
+        `insert into training_plans (
+          id, user_id, version, status, start_date, end_date, plan_summary, generation_source, created_at
+        ) values (?1, ?2, 1, 'active', ?3, ?4, ?5, ?6, ?7)`
+      )
+      .bind(
+        planId,
+        body.userId,
+        startDate,
+        addDaysIso(28),
+        plan.summary,
+        'fallback',
+        createdAt
+      )
+      .run()
+
+    for (const week of plan.weeks) {
+      const weekId = crypto.randomUUID()
+
+      await c.env.DB
+        .prepare(
+          `insert into training_weeks (
+            id, training_plan_id, week_number, focus_label, total_target_distance, notes
+          ) values (?1, ?2, ?3, ?4, ?5, ?6)`
+        )
+        .bind(
+          weekId,
+          planId,
+          week.weekNumber,
+          week.focus,
+          week.targetDistanceKm,
+          ''
+        )
+        .run()
+
+      for (const session of week.sessions) {
+        await c.env.DB
+          .prepare(
+            `insert into training_sessions (
+              id, training_week_id, day_of_week, session_type, title, objective,
+              distance_target, duration_target, intensity_zone, warmup_text,
+              main_set_text, cooldown_text, estimated_load, status
+            ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 'planned')`
+          )
+          .bind(
+            crypto.randomUUID(),
+            weekId,
+            session.day,
+            normalizeSessionType(session.title),
+            session.title,
+            session.objective,
+            session.distanceKm ?? null,
+            session.durationMin ?? null,
+            session.zone,
+            session.warmup,
+            session.mainSet,
+            session.cooldown,
+            session.estimatedLoad
+          )
+          .run()
+      }
+    }
+
+    return c.json({
+      ok: true,
+      planId,
+      plan,
+      message: 'Plan generado correctamente',
+    })
+  } catch (error) {
+    return c.json(
+      {
+        ok: false,
+        error: error instanceof Error ? error.message : 'Internal Server Error',
+      },
+      500
+    )
+  }
+})
+
+app.get('/api/plan/:userId', async (c) => {
+  try {
+    const userId = c.req.param('userId')
+
+    const plan = await c.env.DB
+      .prepare(
+        `select id, plan_summary, start_date, end_date, created_at
+         from training_plans
+         where user_id = ?1 and status = 'active'
+         order by created_at desc
+         limit 1`
+      )
+      .bind(userId)
+      .first()
+
+    if (!plan) {
+      return c.json({ ok: false, error: 'No active plan found' }, 404)
+    }
+
+    const weeks = await c.env.DB
+      .prepare(
+        `select id, week_number, focus_label, total_target_distance
+         from training_weeks
+         where training_plan_id = ?1
+         order by week_number asc`
+      )
+      .bind(plan.id)
+      .all()
+
+    const hydratedWeeks = []
+
+    for (const week of weeks.results ?? []) {
+      const sessions = await c.env.DB
+        .prepare(
+          `select id, day_of_week, title, objective, distance_target, duration_target,
+                  intensity_zone, warmup_text, main_set_text, cooldown_text, estimated_load, status
+           from training_sessions
+           where training_week_id = ?1
+           order by rowid asc`
+        )
+        .bind(week.id)
+        .all()
+
+      hydratedWeeks.push({
+        ...week,
+        sessions: sessions.results ?? [],
+      })
+    }
+
+    return c.json({
+      ok: true,
+      plan,
+      weeks: hydratedWeeks,
+    })
+  } catch (error) {
+    return c.json(
+      {
+        ok: false,
+        error: error instanceof Error ? error.message : 'Internal Server Error',
+      },
+      500
+    )
+  }
+})
+
 function validateProfile(input: AthleteProfileInput) {
   if (!input.name?.trim()) throw new Error('Name is required')
   if (!input.email?.trim()) throw new Error('Email is required')
@@ -161,6 +360,126 @@ function validateProfile(input: AthleteProfileInput) {
   if (input.currentVolumeKm < 0) {
     throw new Error('currentVolumeKm must be >= 0')
   }
+}
+
+function normalizeSessionType(title: string) {
+  const t = title.toLowerCase()
+  if (t.includes('tempo')) return 'tempo'
+  if (t.includes('interval')) return 'intervals'
+  if (t.includes('larga')) return 'long_run'
+  if (t.includes('suave')) return 'easy'
+  return 'general'
+}
+
+function generateFallbackPlan(profile: AthleteProfileInput): TrainingPlan {
+  const weeklyTarget = Math.max(profile.currentVolumeKm + 6, 20)
+
+  return {
+    summary: `Plan inicial de ${profile.distance} para ${profile.name}, enfocado en ${profile.goal.toLowerCase()}.`,
+    weeks: [1, 2, 3, 4].map((weekNumber) => ({
+      weekNumber,
+      focus:
+        weekNumber < 3
+          ? 'Construcción de base'
+          : weekNumber === 3
+            ? 'Carga controlada'
+            : 'Consolidación',
+      targetDistanceKm: weeklyTarget + (weekNumber - 1) * 3,
+      sessions: buildSessions(profile, weekNumber),
+    })),
+  }
+}
+
+function buildSessions(profile: AthleteProfileInput, weekNumber: number): TrainingSession[] {
+  const easyKm = Math.max(
+    5,
+    Math.round((profile.currentVolumeKm / Math.max(profile.daysPerWeek, 1)) * 0.8)
+  )
+  const tempoKm = easyKm + 2
+  const longKm =
+    profile.distance === '5K'
+      ? 8
+      : profile.distance === '10K'
+        ? 12
+        : profile.distance === '21K'
+          ? 16 + weekNumber
+          : 22 + weekNumber
+
+  const sessions: TrainingSession[] = [
+    {
+      day: 'Lunes',
+      title: 'Rodaje suave',
+      objective: 'Construir base aeróbica y mantener continuidad.',
+      distanceKm: easyKm,
+      durationMin: 45,
+      zone: 'Z2',
+      warmup: '10 min trote suave',
+      mainSet: `${easyKm - 2} km a ritmo conversacional`,
+      cooldown: '5 min trote suave',
+      estimatedLoad: 35,
+    },
+    {
+      day: 'Miércoles',
+      title: 'Tempo progresivo',
+      objective: 'Mejorar ritmo controlado y tolerancia al esfuerzo.',
+      distanceKm: tempoKm,
+      durationMin: 60,
+      zone: 'Z3-Z4',
+      warmup: '15 min suaves + movilidad',
+      mainSet: '3 bloques progresivos de 8 min con recuperación corta',
+      cooldown: '10 min suaves',
+      estimatedLoad: 62,
+    },
+    {
+      day: 'Sábado',
+      title: 'Tirada larga',
+      objective: 'Desarrollar resistencia específica para el objetivo.',
+      distanceKm: longKm,
+      durationMin: 90,
+      zone: 'Z2',
+      warmup: '10 min suaves',
+      mainSet: `${longKm - 2} km constantes`,
+      cooldown: '5 min caminata + movilidad',
+      estimatedLoad: 78,
+    },
+  ]
+
+  if (profile.daysPerWeek >= 4) {
+    sessions.splice(1, 0, {
+      day: 'Martes',
+      title: 'Fuerza y técnica',
+      objective: 'Mejorar economía de carrera y prevenir lesiones.',
+      durationMin: 35,
+      zone: 'Complementario',
+      warmup: 'Activación general',
+      mainSet: 'Circuito de fuerza de pierna y core + drills',
+      cooldown: 'Movilidad de cadera y tobillo',
+      estimatedLoad: 28,
+    })
+  }
+
+  if (profile.daysPerWeek >= 5) {
+    sessions.push({
+      day: 'Domingo',
+      title: 'Recuperación activa',
+      objective: 'Facilitar recuperación sin perder continuidad.',
+      distanceKm: 4,
+      durationMin: 30,
+      zone: 'Z1-Z2',
+      warmup: '5 min suaves',
+      mainSet: 'Rodaje ligero o caminata rápida',
+      cooldown: 'Movilidad ligera',
+      estimatedLoad: 18,
+    })
+  }
+
+  return sessions
+}
+
+function addDaysIso(days: number) {
+  const d = new Date()
+  d.setDate(d.getDate() + days)
+  return d.toISOString().slice(0, 10)
 }
 
 const schemaSql = `
