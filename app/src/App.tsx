@@ -2,6 +2,24 @@ import { useState } from "react";
 
 const API_URL = "https://trainingapp-api.marco-cruz.workers.dev";
 
+type Session = {
+  id?: string;
+  day_of_week?: string;
+  title: string;
+  objective?: string;
+  distance_target?: number;
+  duration_target?: number;
+  intensity_zone?: string;
+};
+
+type Week = {
+  id?: string;
+  week_number: number;
+  focus_label?: string;
+  total_target_distance?: number;
+  sessions: Session[];
+};
+
 export default function App() {
   const [form, setForm] = useState({
     name: "",
@@ -17,6 +35,8 @@ export default function App() {
 
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState("");
+  const [weeks, setWeeks] = useState<Week[]>([]);
+  const [userId, setUserId] = useState("");
 
   const handleChange = (
     e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>
@@ -35,6 +55,8 @@ export default function App() {
     e.preventDefault();
     setLoading(true);
     setResult("");
+    setWeeks([]);
+    setUserId("");
 
     try {
       const onboardingRes = await fetch(`${API_URL}/api/onboarding`, {
@@ -51,13 +73,16 @@ export default function App() {
         throw new Error(onboardingData?.error || "Error guardando onboarding");
       }
 
+      const newUserId = onboardingData.userId;
+      setUserId(newUserId);
+
       const planRes = await fetch(`${API_URL}/api/plan/generate`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          userId: onboardingData.userId,
+          userId: newUserId,
           ...form,
         }),
       });
@@ -68,8 +93,16 @@ export default function App() {
         throw new Error(planData?.error || "Error generando plan");
       }
 
+      const readRes = await fetch(`${API_URL}/api/plan/${newUserId}`);
+      const readData = await readRes.json();
+
+      if (!readRes.ok) {
+        throw new Error(readData?.error || "Error consultando plan");
+      }
+
+      setWeeks(readData.weeks || []);
       setResult(
-        `Perfil guardado y plan generado correctamente. User ID: ${onboardingData.userId}`
+        `Perfil guardado y plan generado correctamente. User ID: ${newUserId}`
       );
     } catch (error) {
       setResult(
@@ -94,7 +127,8 @@ export default function App() {
           </h1>
           <p style={subtitleStyle}>
             Define tu objetivo, tu distancia y tu nivel actual. Al guardar tu
-            perfil, el sistema generará automáticamente tu plan inicial.
+            perfil, el sistema generará automáticamente tu plan inicial y lo
+            mostrará abajo.
           </p>
 
           <div style={featureGridStyle}>
@@ -253,6 +287,60 @@ export default function App() {
           </form>
 
           {result && <div style={resultStyle}>{result}</div>}
+
+          {userId && (
+            <div style={metaStyle}>
+              <strong>User ID:</strong> {userId}
+            </div>
+          )}
+
+          {weeks.length > 0 && (
+            <div style={planContainerStyle}>
+              <h3 style={planTitleStyle}>Tu plan inicial</h3>
+              {weeks.map((week) => (
+                <div key={week.week_number} style={weekCardStyle}>
+                  <div style={weekHeaderStyle}>
+                    <div>
+                      <div style={weekLabelStyle}>Semana {week.week_number}</div>
+                      <div style={weekFocusStyle}>
+                        {week.focus_label || "Bloque de entrenamiento"}
+                      </div>
+                    </div>
+                    <div style={weekDistanceStyle}>
+                      {week.total_target_distance ?? 0} km
+                    </div>
+                  </div>
+
+                  <div style={sessionsListStyle}>
+                    {week.sessions.map((session, index) => (
+                      <div key={index} style={sessionCardStyle}>
+                        <div style={sessionDayStyle}>
+                          {session.day_of_week || "Sesión"}
+                        </div>
+                        <div style={sessionTitleStyle}>{session.title}</div>
+                        <div style={sessionMetaStyle}>
+                          {session.distance_target
+                            ? `${session.distance_target} km`
+                            : ""}
+                          {session.duration_target
+                            ? ` · ${session.duration_target} min`
+                            : ""}
+                          {session.intensity_zone
+                            ? ` · ${session.intensity_zone}`
+                            : ""}
+                        </div>
+                        {session.objective && (
+                          <div style={sessionObjectiveStyle}>
+                            {session.objective}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -468,4 +556,89 @@ const resultStyle: React.CSSProperties = {
   color: "#00E6FF",
   lineHeight: 1.5,
   wordBreak: "break-word",
+};
+
+const metaStyle: React.CSSProperties = {
+  marginTop: 14,
+  color: "rgba(255,255,255,0.72)",
+  fontSize: 13,
+};
+
+const planContainerStyle: React.CSSProperties = {
+  marginTop: 28,
+  display: "grid",
+  gap: 16,
+};
+
+const planTitleStyle: React.CSSProperties = {
+  margin: 0,
+  fontSize: 24,
+  color: "#D6FF4D",
+};
+
+const weekCardStyle: React.CSSProperties = {
+  borderRadius: 18,
+  border: "1px solid rgba(255,255,255,0.08)",
+  background: "rgba(255,255,255,0.03)",
+  padding: 18,
+};
+
+const weekHeaderStyle: React.CSSProperties = {
+  display: "flex",
+  justifyContent: "space-between",
+  alignItems: "center",
+  gap: 12,
+  marginBottom: 14,
+};
+
+const weekLabelStyle: React.CSSProperties = {
+  fontSize: 13,
+  color: "rgba(255,255,255,0.55)",
+};
+
+const weekFocusStyle: React.CSSProperties = {
+  fontSize: 18,
+  fontWeight: 700,
+};
+
+const weekDistanceStyle: React.CSSProperties = {
+  color: "#00E6FF",
+  fontWeight: 700,
+};
+
+const sessionsListStyle: React.CSSProperties = {
+  display: "grid",
+  gap: 10,
+};
+
+const sessionCardStyle: React.CSSProperties = {
+  borderRadius: 14,
+  background: "#0B0F14",
+  border: "1px solid rgba(255,255,255,0.06)",
+  padding: 14,
+};
+
+const sessionDayStyle: React.CSSProperties = {
+  fontSize: 12,
+  color: "#D6FF4D",
+  marginBottom: 4,
+  fontWeight: 700,
+};
+
+const sessionTitleStyle: React.CSSProperties = {
+  fontSize: 16,
+  fontWeight: 700,
+  marginBottom: 6,
+};
+
+const sessionMetaStyle: React.CSSProperties = {
+  fontSize: 13,
+  color: "rgba(255,255,255,0.65)",
+  marginBottom: 6,
+};
+
+const sessionObjectiveStyle: React.CSSProperties = {
+  fontSize: 13,
+  color: "rgba(255,255,255,0.82)",
+  lineHeight: 1.5,
 };
