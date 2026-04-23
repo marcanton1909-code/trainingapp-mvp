@@ -1,4 +1,4 @@
-name = "training-api"
+name = "trainingapp-api"
 main = "src/index.ts"
 compatibility_date = "2025-04-22"
 
