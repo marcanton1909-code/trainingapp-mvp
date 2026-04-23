@@ -38,6 +38,9 @@ export default function App() {
   const [weeks, setWeeks] = useState<Week[]>([]);
   const [userId, setUserId] = useState("");
 
+  const [lookupEmail, setLookupEmail] = useState("");
+  const [lookupLoading, setLookupLoading] = useState(false);
+
   const handleChange = (
     e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>
   ) => {
@@ -51,12 +54,27 @@ export default function App() {
     }));
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setLoading(true);
+  const resetPlanState = () => {
     setResult("");
     setWeeks([]);
     setUserId("");
+  };
+
+  const fetchPlan = async (id: string) => {
+    const readRes = await fetch(`${API_URL}/api/plan/${id}`);
+    const readData = await readRes.json();
+
+    if (!readRes.ok) {
+      throw new Error(readData?.error || "Error consultando plan");
+    }
+
+    setWeeks(readData.weeks || []);
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+    resetPlanState();
 
     try {
       const onboardingRes = await fetch(`${API_URL}/api/onboarding`, {
@@ -93,14 +111,8 @@ export default function App() {
         throw new Error(planData?.error || "Error generando plan");
       }
 
-      const readRes = await fetch(`${API_URL}/api/plan/${newUserId}`);
-      const readData = await readRes.json();
+      await fetchPlan(newUserId);
 
-      if (!readRes.ok) {
-        throw new Error(readData?.error || "Error consultando plan");
-      }
-
-      setWeeks(readData.weeks || []);
       setResult(
         `Perfil guardado y plan generado correctamente. User ID: ${newUserId}`
       );
@@ -110,6 +122,43 @@ export default function App() {
       );
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleLookup = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLookupLoading(true);
+    resetPlanState();
+
+    try {
+      const userRes = await fetch(`${API_URL}/api/user/find`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ email: lookupEmail }),
+      });
+
+      const userData = await userRes.json();
+
+      if (!userRes.ok) {
+        throw new Error(userData?.error || "Error buscando usuario");
+      }
+
+      const existingUserId = userData.user.id;
+      setUserId(existingUserId);
+
+      await fetchPlan(existingUserId);
+
+      setResult(
+        `Usuario encontrado correctamente. Plan cargado para: ${userData.user.email}`
+      );
+    } catch (error) {
+      setResult(
+        error instanceof Error ? error.message : "Ocurrió un error inesperado"
+      );
+    } finally {
+      setLookupLoading(false);
     }
   };
 
@@ -126,9 +175,8 @@ export default function App() {
             Tu plan de running con IA empieza aquí.
           </h1>
           <p style={subtitleStyle}>
-            Define tu objetivo, tu distancia y tu nivel actual. Al guardar tu
-            perfil, el sistema generará automáticamente tu plan inicial y lo
-            mostrará abajo.
+            Puedes crear un perfil nuevo y generar un plan, o buscar un usuario
+            existente por correo para volver a consultar su plan.
           </p>
 
           <div style={featureGridStyle}>
@@ -154,137 +202,171 @@ export default function App() {
         <div style={formCardStyle}>
           <div style={formHeaderStyle}>
             <span style={badgeStyle}>Onboarding MVP</span>
-            <h2 style={formTitleStyle}>Crea tu perfil inicial</h2>
+            <h2 style={formTitleStyle}>Crear o consultar plan</h2>
             <p style={formTextStyle}>
-              Esta información se guarda en Cloudflare y después genera tu plan
-              automáticamente.
+              Usa el primer bloque para crear un perfil nuevo. Usa el segundo
+              para cargar el plan de un usuario ya registrado.
             </p>
           </div>
 
-          <form onSubmit={handleSubmit} style={formStyle}>
-            <div style={fieldGroupStyle}>
-              <label style={labelStyle}>Nombre</label>
-              <input
-                name="name"
-                placeholder="Tu nombre"
-                value={form.name}
-                onChange={handleChange}
-                required
-                style={inputStyle}
-              />
-            </div>
+          <div style={sectionStyle}>
+            <h3 style={sectionTitleStyle}>1. Crear perfil y generar plan</h3>
 
-            <div style={fieldGroupStyle}>
-              <label style={labelStyle}>Correo</label>
-              <input
-                name="email"
-                type="email"
-                placeholder="tucorreo@email.com"
-                value={form.email}
-                onChange={handleChange}
-                required
-                style={inputStyle}
-              />
-            </div>
-
-            <div style={twoColsStyle}>
+            <form onSubmit={handleSubmit} style={formStyle}>
               <div style={fieldGroupStyle}>
-                <label style={labelStyle}>Objetivo</label>
-                <select
-                  name="goal"
-                  value={form.goal}
-                  onChange={handleChange}
-                  style={inputStyle}
-                >
-                  <option>Completar una carrera</option>
-                  <option>Mejorar tiempo</option>
-                  <option>Retomar constancia</option>
-                </select>
-              </div>
-
-              <div style={fieldGroupStyle}>
-                <label style={labelStyle}>Distancia</label>
-                <select
-                  name="distance"
-                  value={form.distance}
-                  onChange={handleChange}
-                  style={inputStyle}
-                >
-                  <option>5K</option>
-                  <option>10K</option>
-                  <option>21K</option>
-                  <option>42K</option>
-                </select>
-              </div>
-            </div>
-
-            <div style={twoColsStyle}>
-              <div style={fieldGroupStyle}>
-                <label style={labelStyle}>Días por semana</label>
+                <label style={labelStyle}>Nombre</label>
                 <input
-                  name="daysPerWeek"
+                  name="name"
+                  placeholder="Tu nombre"
+                  value={form.name}
+                  onChange={handleChange}
+                  required
+                  style={inputStyle}
+                />
+              </div>
+
+              <div style={fieldGroupStyle}>
+                <label style={labelStyle}>Correo</label>
+                <input
+                  name="email"
+                  type="email"
+                  placeholder="tucorreo@email.com"
+                  value={form.email}
+                  onChange={handleChange}
+                  required
+                  style={inputStyle}
+                />
+              </div>
+
+              <div style={twoColsStyle}>
+                <div style={fieldGroupStyle}>
+                  <label style={labelStyle}>Objetivo</label>
+                  <select
+                    name="goal"
+                    value={form.goal}
+                    onChange={handleChange}
+                    style={inputStyle}
+                  >
+                    <option>Completar una carrera</option>
+                    <option>Mejorar tiempo</option>
+                    <option>Retomar constancia</option>
+                  </select>
+                </div>
+
+                <div style={fieldGroupStyle}>
+                  <label style={labelStyle}>Distancia</label>
+                  <select
+                    name="distance"
+                    value={form.distance}
+                    onChange={handleChange}
+                    style={inputStyle}
+                  >
+                    <option>5K</option>
+                    <option>10K</option>
+                    <option>21K</option>
+                    <option>42K</option>
+                  </select>
+                </div>
+              </div>
+
+              <div style={twoColsStyle}>
+                <div style={fieldGroupStyle}>
+                  <label style={labelStyle}>Días por semana</label>
+                  <input
+                    name="daysPerWeek"
+                    type="number"
+                    min={1}
+                    max={7}
+                    value={form.daysPerWeek}
+                    onChange={handleChange}
+                    style={inputStyle}
+                  />
+                </div>
+
+                <div style={fieldGroupStyle}>
+                  <label style={labelStyle}>Nivel</label>
+                  <select
+                    name="level"
+                    value={form.level}
+                    onChange={handleChange}
+                    style={inputStyle}
+                  >
+                    <option>Principiante</option>
+                    <option>Intermedio</option>
+                    <option>Avanzado</option>
+                  </select>
+                </div>
+              </div>
+
+              <div style={fieldGroupStyle}>
+                <label style={labelStyle}>Volumen actual por semana (km)</label>
+                <input
+                  name="currentVolumeKm"
                   type="number"
-                  min={1}
-                  max={7}
-                  value={form.daysPerWeek}
+                  min={0}
+                  value={form.currentVolumeKm}
                   onChange={handleChange}
                   style={inputStyle}
                 />
               </div>
 
               <div style={fieldGroupStyle}>
-                <label style={labelStyle}>Nivel</label>
-                <select
-                  name="level"
-                  value={form.level}
+                <label style={labelStyle}>Evento objetivo</label>
+                <input
+                  name="eventName"
+                  placeholder="Ej. Medio Maratón CDMX"
+                  value={form.eventName}
                   onChange={handleChange}
                   style={inputStyle}
-                >
-                  <option>Principiante</option>
-                  <option>Intermedio</option>
-                  <option>Avanzado</option>
-                </select>
+                />
               </div>
-            </div>
 
-            <div style={fieldGroupStyle}>
-              <label style={labelStyle}>Volumen actual por semana (km)</label>
-              <input
-                name="currentVolumeKm"
-                type="number"
-                min={0}
-                value={form.currentVolumeKm}
-                onChange={handleChange}
-                style={inputStyle}
-              />
-            </div>
+              <div style={fieldGroupStyle}>
+                <label style={labelStyle}>Fecha del evento</label>
+                <input
+                  name="eventDate"
+                  type="date"
+                  value={form.eventDate}
+                  onChange={handleChange}
+                  style={inputStyle}
+                />
+              </div>
 
-            <div style={fieldGroupStyle}>
-              <label style={labelStyle}>Evento objetivo</label>
-              <input
-                name="eventName"
-                placeholder="Ej. Medio Maratón CDMX"
-                value={form.eventName}
-                onChange={handleChange}
-                style={inputStyle}
-              />
-            </div>
+              <button type="submit" disabled={loading} style={buttonStyle}>
+                {loading
+                  ? "Guardando y generando plan..."
+                  : "Guardar y generar plan"}
+              </button>
+            </form>
+          </div>
 
-            <div style={fieldGroupStyle}>
-              <label style={labelStyle}>Fecha del evento</label>
-              <input
-                name="eventDate"
-                type="date"
-                value={form.eventDate}
-                onChange={handleChange}
-                style={inputStyle}
-              />
-            </div>
+          <div style={dividerStyle} />
 
-            <button type="submit" disabled={loading} style={buttonStyle}>
-              {loading ? "Guardando y generando plan..." : "Guardar y generar plan"}
-            </button>
-          </form>
+          <div style={sectionStyle}>
+            <h3 style={sectionTitleStyle}>2. Consultar plan existente</h3>
+
+            <form onSubmit={handleLookup} style={formStyle}>
+              <div style={fieldGroupStyle}>
+                <label style={labelStyle}>Correo registrado</label>
+                <input
+                  type="email"
+                  placeholder="correo registrado"
+                  value={lookupEmail}
+                  onChange={(e) => setLookupEmail(e.target.value)}
+                  required
+                  style={inputStyle}
+                />
+              </div>
+
+              <button
+                type="submit"
+                disabled={lookupLoading}
+                style={secondaryButtonStyle}
+              >
+                {lookupLoading ? "Buscando plan..." : "Buscar usuario y cargar plan"}
+              </button>
+            </form>
+          </div>
 
           {result && <div style={resultStyle}>{result}</div>}
 
@@ -503,6 +585,23 @@ const formTextStyle: React.CSSProperties = {
   lineHeight: 1.6,
 };
 
+const sectionStyle: React.CSSProperties = {
+  display: "grid",
+  gap: 14,
+};
+
+const sectionTitleStyle: React.CSSProperties = {
+  margin: 0,
+  fontSize: 18,
+  color: "#D6FF4D",
+};
+
+const dividerStyle: React.CSSProperties = {
+  height: 1,
+  background: "rgba(255,255,255,0.08)",
+  margin: "24px 0",
+};
+
 const formStyle: React.CSSProperties = {
   display: "grid",
   gap: 14,
@@ -541,6 +640,17 @@ const buttonStyle: React.CSSProperties = {
   background: "#D6FF4D",
   color: "#000",
   border: "none",
+  borderRadius: 14,
+  padding: "15px 16px",
+  fontWeight: 800,
+  cursor: "pointer",
+  marginTop: 8,
+};
+
+const secondaryButtonStyle: React.CSSProperties = {
+  background: "rgba(0,230,255,0.14)",
+  color: "#00E6FF",
+  border: "1px solid rgba(0,230,255,0.20)",
   borderRadius: 14,
   padding: "15px 16px",
   fontWeight: 800,
