@@ -181,7 +181,7 @@ function buildPlanStructure(input: AthleteProfileInput) {
     "Ajuste y descarga",
   ];
 
-  const weeks = [1, 2, 3, 4].map((weekNumber) => {
+  return [1, 2, 3, 4].map((weekNumber) => {
     const sessions = buildSessionsForWeek(input, weekNumber);
     const totalTargetDistance = roundToHalf(
       sessions.reduce((sum, s) => sum + Number(s.distance_target || 0), 0)
@@ -194,8 +194,58 @@ function buildPlanStructure(input: AthleteProfileInput) {
       sessions,
     };
   });
+}
 
-  return weeks;
+function timingSafeEqualHex(a: string, b: string) {
+  if (!a || !b || a.length !== b.length) return false;
+  let result = 0;
+  for (let i = 0; i < a.length; i++) {
+    result |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return result === 0;
+}
+
+async function sha256Hex(value: string) {
+  const data = new TextEncoder().encode(value);
+  const digest = await crypto.subtle.digest("SHA-256", data);
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+function extractTsAndV1(signatureHeader: string) {
+  const parts = signatureHeader.split(",");
+  let ts = "";
+  let v1 = "";
+
+  for (const rawPart of parts) {
+    const part = rawPart.trim();
+    if (part.startsWith("ts=")) ts = part.slice(3);
+    if (part.startsWith("v1=")) v1 = part.slice(3);
+  }
+
+  return { ts, v1 };
+}
+
+async function validateMercadoPagoSignature(
+  secret: string,
+  signatureHeader: string,
+  requestId: string,
+  rawBody: string
+) {
+  if (!secret || !signatureHeader || !requestId || !rawBody) {
+    return false;
+  }
+
+  const { ts, v1 } = extractTsAndV1(signatureHeader);
+
+  if (!ts || !v1) return false;
+
+  const manifest = `id:${requestId};request-id:${requestId};ts:${ts};`;
+  const payloadToSign = manifest + rawBody + secret;
+  const calculated = await sha256Hex(payloadToSign);
+
+  return timingSafeEqualHex(calculated, v1);
 }
 
 app.get("/", (c) => {
@@ -535,6 +585,13 @@ app.post("/api/mercadopago/webhook", async (c) => {
       parsedBody = {};
     }
 
+    const signatureValid = await validateMercadoPagoSignature(
+      secret,
+      xSignature,
+      xRequestId,
+      rawBody
+    );
+
     const eventId = crypto.randomUUID();
     const createdAt = new Date().toISOString();
     const eventType = parsedBody.type || null;
@@ -566,6 +623,7 @@ app.post("/api/mercadopago/webhook", async (c) => {
       hasSignature: Boolean(xSignature),
       hasRequestId: Boolean(xRequestId),
       hasSecret: Boolean(secret),
+      signatureValid,
       eventId,
       eventType,
       externalId,
