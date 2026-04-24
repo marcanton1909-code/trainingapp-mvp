@@ -515,7 +515,7 @@ app.post("/api/plan/generate", async (c) => {
     const batchStatements = [
       c.env.DB
         .prepare(
-          `insert into plans (id, user_id, name, status, created_at)
+          `insert into training_plans (id, user_id, name, status, created_at)
            values (?1, ?2, ?3, 'active', ?4)`
         )
         .bind(planId, body.userId, `Plan ${body.distance.trim()} - ${body.goal.trim()}`, createdAt),
@@ -527,7 +527,7 @@ app.post("/api/plan/generate", async (c) => {
       batchStatements.push(
         c.env.DB
           .prepare(
-            `insert into plan_weeks (
+            `insert into training_weeks (
               id, plan_id, week_number, focus_label, total_target_distance, created_at
             ) values (?1, ?2, ?3, ?4, ?5, ?6)`
           )
@@ -547,7 +547,7 @@ app.post("/api/plan/generate", async (c) => {
         batchStatements.push(
           c.env.DB
             .prepare(
-              `insert into plan_sessions (
+              `insert into training_sessions (
                 id, week_id, day_of_week, title, objective,
                 distance_target, duration_target, intensity_zone,
                 warmup_text, main_set_text, cooldown_text,
@@ -606,7 +606,7 @@ app.get("/api/plan/:userId", async (c) => {
     const plan = await c.env.DB
       .prepare(
         `select id, user_id, name, status, created_at
-         from plans
+         from training_plans
          where user_id = ?1
          order by created_at desc
          limit 1`
@@ -621,7 +621,7 @@ app.get("/api/plan/:userId", async (c) => {
     const weekRows = await c.env.DB
       .prepare(
         `select id, week_number, focus_label, total_target_distance
-         from plan_weeks
+         from training_weeks
          where plan_id = ?1
          order by week_number asc`
       )
@@ -639,7 +639,7 @@ app.get("/api/plan/:userId", async (c) => {
              distance_target, duration_target, intensity_zone,
              warmup_text, main_set_text, cooldown_text,
              estimated_load, status, sort_order
-           from plan_sessions
+           from training_sessions
            where week_id = ?1
            order by sort_order asc, created_at asc`
         )
