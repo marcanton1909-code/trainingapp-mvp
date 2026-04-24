@@ -1,121 +1,242 @@
-import { Hono } from 'hono'
-import { cors } from 'hono/cors'
+import { Hono } from "hono";
+import type { Context } from "hono";
 
 type Bindings = {
-  DB: D1Database
-}
+  DB: D1Database;
+  MP_WEBHOOK_SECRET: string;
+};
 
 type AthleteProfileInput = {
-  name: string
-  email: string
-  goal: string
-  distance: '5K' | '10K' | '21K' | '42K'
-  daysPerWeek: number
-  level: 'Principiante' | 'Intermedio' | 'Avanzado'
-  currentVolumeKm: number
-  eventName?: string
-  eventDate?: string
-  notes?: string
+  name: string;
+  email: string;
+  goal: string;
+  distance: string;
+  daysPerWeek: number;
+  level: string;
+  currentVolumeKm: number;
+  eventName?: string;
+  eventDate?: string;
+  notes?: string;
+};
+
+type SessionSeed = {
+  day_of_week: string;
+  title: string;
+  objective: string;
+  distance_target: number | null;
+  duration_target: number | null;
+  intensity_zone: string;
+  warmup_text: string;
+  main_set_text: string;
+  cooldown_text: string;
+  estimated_load: number;
+  status: string;
+  sort_order: number;
+};
+
+const app = new Hono<{ Bindings: Bindings }>();
+
+function jsonError(c: Context<{ Bindings: Bindings }>, message: string, status = 400) {
+  return c.json(
+    {
+      ok: false,
+      error: message,
+    },
+    status
+  );
 }
 
-type GeneratePlanInput = AthleteProfileInput & {
-  userId: string
+function normalizeEmail(email: string) {
+  return email.trim().toLowerCase();
 }
 
-type TrainingSession = {
-  day: string
-  title: string
-  objective: string
-  distanceKm?: number
-  durationMin?: number
-  zone: string
-  warmup: string
-  mainSet: string
-  cooldown: string
-  estimatedLoad: number
+function normalizeDistance(distance: string) {
+  const value = distance.trim().toUpperCase();
+  if (value === "5K") return 5;
+  if (value === "10K") return 10;
+  if (value === "21K") return 21;
+  if (value === "42K") return 42;
+  return 10;
 }
 
-type TrainingWeek = {
-  weekNumber: number
-  focus: string
-  targetDistanceKm: number
-  sessions: TrainingSession[]
-}
-
-type TrainingPlan = {
-  summary: string
-  weeks: TrainingWeek[]
-}
-
-const app = new Hono<{ Bindings: Bindings }>()
-
-app.use(
-  '*',
-  cors({
-    origin: '*',
-    allowHeaders: ['Content-Type', 'Authorization'],
-    allowMethods: ['GET', 'POST', 'PUT', 'OPTIONS'],
-  })
-)
-
-app.get('/', (c) => {
-  return c.json({
-    ok: true,
-    service: 'trAIning API',
-    version: '0.4.0',
-  })
-})
-
-app.get('/health', async (c) => {
-  const dbOk = await c.env.DB.prepare('select 1 as ok').first().catch(() => null)
-
-  return c.json({
-    ok: true,
-    db: Boolean(dbOk),
-  })
-})
-
-app.post('/api/setup', async (c) => {
-  const statements = schemaSql
-    .split(';')
-    .map((s) => s.trim())
-    .filter(Boolean)
-
-  for (const statement of statements) {
-    await c.env.DB.prepare(statement).run()
+function validateProfile(body: AthleteProfileInput) {
+  if (!body.name?.trim()) throw new Error("El nombre es obligatorio");
+  if (!body.email?.trim()) throw new Error("El correo es obligatorio");
+  if (!body.email.includes("@")) throw new Error("El correo no es válido");
+  if (!body.goal?.trim()) throw new Error("El objetivo es obligatorio");
+  if (!body.distance?.trim()) throw new Error("La distancia es obligatoria");
+  if (!Number.isFinite(body.daysPerWeek) || body.daysPerWeek < 1 || body.daysPerWeek > 7) {
+    throw new Error("Los días por semana deben estar entre 1 y 7");
   }
+  if (!body.level?.trim()) throw new Error("El nivel es obligatorio");
+  if (!Number.isFinite(body.currentVolumeKm) || body.currentVolumeKm < 0) {
+    throw new Error("El volumen actual debe ser 0 o mayor");
+  }
+}
 
+function roundToHalf(value: number) {
+  return Math.round(value * 2) / 2;
+}
+
+function buildSessionsForWeek(input: AthleteProfileInput, weekNumber: number): SessionSeed[] {
+  const distance = normalizeDistance(input.distance);
+  const baseVolume = Math.max(6, input.currentVolumeKm || 8);
+  const growthFactor = weekNumber === 4 ? 0.82 : 1 + (weekNumber - 1) * 0.08;
+  const weeklyVolume = roundToHalf(baseVolume * growthFactor);
+
+  const easyRun = roundToHalf(Math.max(3, weeklyVolume * 0.28));
+  const qualityRun = roundToHalf(Math.max(4, weeklyVolume * 0.22));
+  const longRun = roundToHalf(
+    Math.min(
+      distance >= 21 ? Math.max(8, weeklyVolume * 0.42) : Math.max(6, weeklyVolume * 0.36),
+      distance >= 42 ? 28 : distance >= 21 ? 18 : distance >= 10 ? 12 : 10
+    )
+  );
+
+  const recoveryRun = roundToHalf(Math.max(3, weeklyVolume - easyRun - qualityRun - longRun));
+  const sessions: SessionSeed[] = [];
+
+  const easyDuration = Math.round(easyRun * 6.5);
+  const qualityDuration = Math.round(qualityRun * 6);
+  const longDuration = Math.round(longRun * 6.7);
+  const recoveryDuration = Math.round(recoveryRun * 6.8);
+
+  sessions.push({
+    day_of_week: "Lunes",
+    title: "Rodaje suave",
+    objective: "Construir base aeróbica y mantener constancia sin fatiga excesiva.",
+    distance_target: easyRun,
+    duration_target: easyDuration,
+    intensity_zone: "Z2",
+    warmup_text: "10 min trote suave + movilidad articular",
+    main_set_text: `Rodaje continuo a ritmo cómodo por ${easyRun} km`,
+    cooldown_text: "5 min trote muy suave + estiramientos ligeros",
+    estimated_load: Math.round(easyDuration * 0.9),
+    status: "planned",
+    sort_order: 1,
+  });
+
+  sessions.push({
+    day_of_week: "Miércoles",
+    title: input.goal === "Mejorar tiempo" ? "Trabajo de calidad" : "Ritmo controlado",
+    objective:
+      input.goal === "Mejorar tiempo"
+        ? "Desarrollar velocidad controlada y tolerancia al esfuerzo."
+        : "Mejorar economía de carrera y control del ritmo.",
+    distance_target: qualityRun,
+    duration_target: qualityDuration,
+    intensity_zone: input.goal === "Mejorar tiempo" ? "Z3-Z4" : "Z3",
+    warmup_text: "12 min trote + movilidad + 4 progresiones",
+    main_set_text:
+      input.goal === "Mejorar tiempo"
+        ? `Bloque principal dentro de ${qualityRun} km con repeticiones controladas`
+        : `Rodaje sostenido dentro de ${qualityRun} km a ritmo controlado`,
+    cooldown_text: "8 min trote suave",
+    estimated_load: Math.round(qualityDuration * 1.15),
+    status: "planned",
+    sort_order: 2,
+  });
+
+  sessions.push({
+    day_of_week: "Viernes",
+    title: "Rodaje de recuperación",
+    objective: "Promover recuperación activa sin perder volumen semanal.",
+    distance_target: recoveryRun,
+    duration_target: recoveryDuration,
+    intensity_zone: "Z1-Z2",
+    warmup_text: "8 min trote suave",
+    main_set_text: `Rodaje regenerativo por ${recoveryRun} km`,
+    cooldown_text: "Movilidad ligera y respiración",
+    estimated_load: Math.round(recoveryDuration * 0.75),
+    status: "planned",
+    sort_order: 3,
+  });
+
+  sessions.push({
+    day_of_week: "Domingo",
+    title: "Tirada larga",
+    objective:
+      distance >= 21
+        ? "Extender resistencia específica para la distancia objetivo."
+        : "Fortalecer resistencia general y confianza en la distancia.",
+    distance_target: longRun,
+    duration_target: longDuration,
+    intensity_zone: "Z2",
+    warmup_text: "12 min trote muy suave",
+    main_set_text: `Tirada larga progresiva por ${longRun} km`,
+    cooldown_text: "Caminata ligera + estiramientos suaves",
+    estimated_load: Math.round(longDuration * 1.2),
+    status: "planned",
+    sort_order: 4,
+  });
+
+  return sessions;
+}
+
+function buildPlanStructure(input: AthleteProfileInput) {
+  const weekLabels = [
+    "Base y adaptación",
+    "Construcción",
+    "Consolidación",
+    "Ajuste y descarga",
+  ];
+
+  const weeks = [1, 2, 3, 4].map((weekNumber) => {
+    const sessions = buildSessionsForWeek(input, weekNumber);
+    const totalTargetDistance = roundToHalf(
+      sessions.reduce((sum, s) => sum + Number(s.distance_target || 0), 0)
+    );
+
+    return {
+      week_number: weekNumber,
+      focus_label: weekLabels[weekNumber - 1] || "Bloque de entrenamiento",
+      total_target_distance: totalTargetDistance,
+      sessions,
+    };
+  });
+
+  return weeks;
+}
+
+app.get("/", (c) => {
   return c.json({
     ok: true,
-    message: 'Schema created',
-  })
-})
+    service: "trainingapp-api",
+  });
+});
 
-app.post('/api/onboarding', async (c) => {
+app.get("/api/health", (c) => {
+  return c.json({
+    ok: true,
+    status: "healthy",
+  });
+});
+
+app.post("/api/onboarding", async (c) => {
   try {
-    const body = (await c.req.json()) as AthleteProfileInput
+    const body = (await c.req.json()) as AthleteProfileInput;
 
-    validateProfile(body)
+    validateProfile(body);
 
     const existingUser = await c.env.DB
       .prepare(`select id from users where email = ?1 limit 1`)
-      .bind(body.email.toLowerCase())
-      .first()
+      .bind(normalizeEmail(body.email))
+      .first();
 
     if (existingUser) {
       return c.json(
         {
           ok: false,
-          error: 'Ese correo ya fue registrado anteriormente',
+          error: "Ese correo ya fue registrado anteriormente",
         },
         409
-      )
+      );
     }
 
-    const userId = crypto.randomUUID()
-    const profileId = crypto.randomUUID()
-    const goalId = crypto.randomUUID()
-    const createdAt = new Date().toISOString()
+    const userId = crypto.randomUUID();
+    const profileId = crypto.randomUUID();
+    const goalId = crypto.randomUUID();
+    const createdAt = new Date().toISOString();
 
     await c.env.DB.batch([
       c.env.DB
@@ -123,7 +244,7 @@ app.post('/api/onboarding', async (c) => {
           `insert into users (id, email, name, created_at)
            values (?1, ?2, ?3, ?4)`
         )
-        .bind(userId, body.email.toLowerCase(), body.name, createdAt),
+        .bind(userId, normalizeEmail(body.email), body.name.trim(), createdAt),
 
       c.env.DB
         .prepare(
@@ -135,11 +256,11 @@ app.post('/api/onboarding', async (c) => {
         .bind(
           profileId,
           userId,
-          body.level,
+          body.level.trim(),
           body.daysPerWeek,
           body.currentVolumeKm,
-          body.goal,
-          body.notes ?? '',
+          body.goal.trim(),
+          body.notes?.trim() || "",
           createdAt
         ),
 
@@ -153,447 +274,276 @@ app.post('/api/onboarding', async (c) => {
         .bind(
           goalId,
           userId,
-          body.goal,
-          body.distance,
-          body.eventName ?? null,
-          body.eventDate ?? null,
+          body.goal.trim(),
+          body.distance.trim(),
+          body.eventName?.trim() || null,
+          body.eventDate?.trim() || null,
           createdAt
         ),
-    ])
+    ]);
 
     return c.json({
       ok: true,
       userId,
       profileId,
       goalId,
-      message: 'Onboarding saved',
-    })
+      message: "Onboarding saved",
+    });
   } catch (error) {
     return c.json(
       {
         ok: false,
-        error: error instanceof Error ? error.message : 'Internal Server Error',
+        error: error instanceof Error ? error.message : "Internal Server Error",
       },
       500
-    )
+    );
   }
-})
+});
 
-app.post('/api/user/find', async (c) => {
+app.post("/api/user/find", async (c) => {
   try {
-    const body = (await c.req.json()) as { email?: string }
+    const body = (await c.req.json()) as { email?: string };
+    const email = normalizeEmail(body.email || "");
 
-    if (!body.email?.trim()) {
-      return c.json({ ok: false, error: 'Email es requerido' }, 400)
+    if (!email) {
+      return jsonError(c, "El correo es obligatorio");
     }
 
     const user = await c.env.DB
-      .prepare(`select id, email, name from users where email = ?1 limit 1`)
-      .bind(body.email.toLowerCase())
-      .first()
+      .prepare(
+        `select id, email, name, created_at
+         from users
+         where email = ?1
+         limit 1`
+      )
+      .bind(email)
+      .first();
 
     if (!user) {
-      return c.json({ ok: false, error: 'Usuario no encontrado' }, 404)
+      return jsonError(c, "No se encontró un usuario con ese correo", 404);
     }
 
     return c.json({
       ok: true,
       user,
-    })
+    });
   } catch (error) {
     return c.json(
       {
         ok: false,
-        error: error instanceof Error ? error.message : 'Internal Server Error',
+        error: error instanceof Error ? error.message : "Internal Server Error",
       },
       500
-    )
+    );
   }
-})
+});
 
-app.post('/api/plan/generate', async (c) => {
+app.post("/api/plan/generate", async (c) => {
   try {
-    const body = (await c.req.json()) as GeneratePlanInput
-
-    validateProfile(body)
+    const body = (await c.req.json()) as AthleteProfileInput & { userId?: string };
 
     if (!body.userId?.trim()) {
-      return c.json({ ok: false, error: 'userId es requerido' }, 400)
+      return jsonError(c, "El userId es obligatorio");
     }
 
-    const existingUser = await c.env.DB
+    validateProfile(body);
+
+    const user = await c.env.DB
       .prepare(`select id from users where id = ?1 limit 1`)
       .bind(body.userId)
-      .first()
+      .first();
 
-    if (!existingUser) {
-      return c.json({ ok: false, error: 'Usuario no encontrado' }, 404)
+    if (!user) {
+      return jsonError(c, "Usuario no encontrado", 404);
     }
 
-    const plan = generateFallbackPlan(body)
-    const planId = crypto.randomUUID()
-    const createdAt = new Date().toISOString()
-    const startDate = new Date().toISOString().slice(0, 10)
+    const planId = crypto.randomUUID();
+    const createdAt = new Date().toISOString();
+    const weeks = buildPlanStructure(body);
 
-    await c.env.DB
-      .prepare(
-        `insert into training_plans (
-          id, user_id, version, status, start_date, end_date, plan_summary, generation_source, created_at
-        ) values (?1, ?2, 1, 'active', ?3, ?4, ?5, ?6, ?7)`
-      )
-      .bind(
-        planId,
-        body.userId,
-        startDate,
-        addDaysIso(28),
-        plan.summary,
-        'fallback',
-        createdAt
-      )
-      .run()
-
-    for (const week of plan.weeks) {
-      const weekId = crypto.randomUUID()
-
-      await c.env.DB
+    const batchStatements = [
+      c.env.DB
         .prepare(
-          `insert into training_weeks (
-            id, training_plan_id, week_number, focus_label, total_target_distance, notes
-          ) values (?1, ?2, ?3, ?4, ?5, ?6)`
+          `insert into plans (id, user_id, name, status, created_at)
+           values (?1, ?2, ?3, 'active', ?4)`
         )
-        .bind(
-          weekId,
-          planId,
-          week.weekNumber,
-          week.focus,
-          week.targetDistanceKm,
-          ''
-        )
-        .run()
+        .bind(planId, body.userId, `Plan ${body.distance.trim()} - ${body.goal.trim()}`, createdAt),
+    ];
 
-      for (const session of week.sessions) {
-        await c.env.DB
+    for (const week of weeks) {
+      const weekId = crypto.randomUUID();
+
+      batchStatements.push(
+        c.env.DB
           .prepare(
-            `insert into training_sessions (
-              id, training_week_id, day_of_week, session_type, title, objective,
-              distance_target, duration_target, intensity_zone, warmup_text,
-              main_set_text, cooldown_text, estimated_load, status
-            ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 'planned')`
+            `insert into plan_weeks (
+              id, plan_id, week_number, focus_label, total_target_distance, created_at
+            ) values (?1, ?2, ?3, ?4, ?5, ?6)`
           )
           .bind(
-            crypto.randomUUID(),
             weekId,
-            session.day,
-            normalizeSessionType(session.title),
-            session.title,
-            session.objective,
-            session.distanceKm ?? null,
-            session.durationMin ?? null,
-            session.zone,
-            session.warmup,
-            session.mainSet,
-            session.cooldown,
-            session.estimatedLoad
+            planId,
+            week.week_number,
+            week.focus_label,
+            week.total_target_distance,
+            createdAt
           )
-          .run()
+      );
+
+      for (const session of week.sessions) {
+        const sessionId = crypto.randomUUID();
+
+        batchStatements.push(
+          c.env.DB
+            .prepare(
+              `insert into plan_sessions (
+                id, week_id, day_of_week, title, objective,
+                distance_target, duration_target, intensity_zone,
+                warmup_text, main_set_text, cooldown_text,
+                estimated_load, status, sort_order, created_at
+              ) values (
+                ?1, ?2, ?3, ?4, ?5,
+                ?6, ?7, ?8,
+                ?9, ?10, ?11,
+                ?12, ?13, ?14, ?15
+              )`
+            )
+            .bind(
+              sessionId,
+              weekId,
+              session.day_of_week,
+              session.title,
+              session.objective,
+              session.distance_target,
+              session.duration_target,
+              session.intensity_zone,
+              session.warmup_text,
+              session.main_set_text,
+              session.cooldown_text,
+              session.estimated_load,
+              session.status,
+              session.sort_order,
+              createdAt
+            )
+        );
       }
     }
+
+    await c.env.DB.batch(batchStatements);
 
     return c.json({
       ok: true,
       planId,
-      plan,
-      message: 'Plan generado correctamente',
-    })
+      weeksCreated: weeks.length,
+      message: "Plan generado correctamente",
+    });
   } catch (error) {
     return c.json(
       {
         ok: false,
-        error: error instanceof Error ? error.message : 'Internal Server Error',
+        error: error instanceof Error ? error.message : "Internal Server Error",
       },
       500
-    )
+    );
   }
-})
+});
 
-app.get('/api/plan/:userId', async (c) => {
+app.get("/api/plan/:userId", async (c) => {
   try {
-    const userId = c.req.param('userId')
+    const userId = c.req.param("userId");
 
     const plan = await c.env.DB
       .prepare(
-        `select id, plan_summary, start_date, end_date, created_at
-         from training_plans
-         where user_id = ?1 and status = 'active'
+        `select id, user_id, name, status, created_at
+         from plans
+         where user_id = ?1
          order by created_at desc
          limit 1`
       )
       .bind(userId)
-      .first()
+      .first();
 
     if (!plan) {
-      return c.json({ ok: false, error: 'No active plan found' }, 404)
+      return jsonError(c, "No se encontró un plan para ese usuario", 404);
     }
 
-    const weeks = await c.env.DB
+    const weekRows = await c.env.DB
       .prepare(
         `select id, week_number, focus_label, total_target_distance
-         from training_weeks
-         where training_plan_id = ?1
+         from plan_weeks
+         where plan_id = ?1
          order by week_number asc`
       )
       .bind(plan.id)
-      .all()
+      .all();
 
-    const hydratedWeeks = []
+    const weeks = [];
+    const rows = weekRows.results || [];
 
-    for (const week of weeks.results ?? []) {
-      const sessions = await c.env.DB
+    for (const week of rows) {
+      const sessionRows = await c.env.DB
         .prepare(
-          `select id, day_of_week, title, objective, distance_target, duration_target,
-                  intensity_zone, warmup_text, main_set_text, cooldown_text, estimated_load, status
-           from training_sessions
-           where training_week_id = ?1
-           order by rowid asc`
+          `select
+             id, day_of_week, title, objective,
+             distance_target, duration_target, intensity_zone,
+             warmup_text, main_set_text, cooldown_text,
+             estimated_load, status, sort_order
+           from plan_sessions
+           where week_id = ?1
+           order by sort_order asc, created_at asc`
         )
         .bind(week.id)
-        .all()
+        .all();
 
-      hydratedWeeks.push({
-        ...week,
-        sessions: sessions.results ?? [],
-      })
+      weeks.push({
+        id: week.id,
+        week_number: week.week_number,
+        focus_label: week.focus_label,
+        total_target_distance: week.total_target_distance,
+        sessions: sessionRows.results || [],
+      });
     }
 
     return c.json({
       ok: true,
       plan,
-      weeks: hydratedWeeks,
-    })
+      weeks,
+    });
   } catch (error) {
     return c.json(
       {
         ok: false,
-        error: error instanceof Error ? error.message : 'Internal Server Error',
+        error: error instanceof Error ? error.message : "Internal Server Error",
       },
       500
-    )
+    );
   }
-})
+});
 
-function validateProfile(input: AthleteProfileInput) {
-  if (!input.name?.trim()) throw new Error('Name is required')
-  if (!input.email?.trim()) throw new Error('Email is required')
-  if (!input.goal?.trim()) throw new Error('Goal is required')
-  if (!input.distance) throw new Error('Distance is required')
-  if (!input.daysPerWeek || input.daysPerWeek < 1 || input.daysPerWeek > 7) {
-    throw new Error('daysPerWeek must be between 1 and 7')
+app.post("/api/mercadopago/webhook", async (c) => {
+  try {
+    const rawBody = await c.req.text();
+    const xSignature = c.req.header("x-signature") || "";
+    const xRequestId = c.req.header("x-request-id") || "";
+    const secret = c.env.MP_WEBHOOK_SECRET || "";
+
+    return c.json({
+      ok: true,
+      received: true,
+      hasSignature: Boolean(xSignature),
+      hasRequestId: Boolean(xRequestId),
+      hasSecret: Boolean(secret),
+      bodyLength: rawBody.length,
+    });
+  } catch (error) {
+    return c.json(
+      {
+        ok: false,
+        error: error instanceof Error ? error.message : "Webhook processing error",
+      },
+      500
+    );
   }
-  if (input.currentVolumeKm < 0) {
-    throw new Error('currentVolumeKm must be >= 0')
-  }
-}
+});
 
-function normalizeSessionType(title: string) {
-  const t = title.toLowerCase()
-  if (t.includes('tempo')) return 'tempo'
-  if (t.includes('interval')) return 'intervals'
-  if (t.includes('larga')) return 'long_run'
-  if (t.includes('suave')) return 'easy'
-  return 'general'
-}
-
-function generateFallbackPlan(profile: AthleteProfileInput): TrainingPlan {
-  const weeklyTarget = Math.max(profile.currentVolumeKm + 6, 20)
-
-  return {
-    summary: `Plan inicial de ${profile.distance} para ${profile.name}, enfocado en ${profile.goal.toLowerCase()}.`,
-    weeks: [1, 2, 3, 4].map((weekNumber) => ({
-      weekNumber,
-      focus:
-        weekNumber < 3
-          ? 'Construcción de base'
-          : weekNumber === 3
-            ? 'Carga controlada'
-            : 'Consolidación',
-      targetDistanceKm: weeklyTarget + (weekNumber - 1) * 3,
-      sessions: buildSessions(profile, weekNumber),
-    })),
-  }
-}
-
-function buildSessions(profile: AthleteProfileInput, weekNumber: number): TrainingSession[] {
-  const easyKm = Math.max(
-    5,
-    Math.round((profile.currentVolumeKm / Math.max(profile.daysPerWeek, 1)) * 0.8)
-  )
-  const tempoKm = easyKm + 2
-  const longKm =
-    profile.distance === '5K'
-      ? 8
-      : profile.distance === '10K'
-        ? 12
-        : profile.distance === '21K'
-          ? 16 + weekNumber
-          : 22 + weekNumber
-
-  const sessions: TrainingSession[] = [
-    {
-      day: 'Lunes',
-      title: 'Rodaje suave',
-      objective: 'Construir base aeróbica y mantener continuidad.',
-      distanceKm: easyKm,
-      durationMin: 45,
-      zone: 'Z2',
-      warmup: '10 min trote suave',
-      mainSet: `${easyKm - 2} km a ritmo conversacional`,
-      cooldown: '5 min trote suave',
-      estimatedLoad: 35,
-    },
-    {
-      day: 'Miércoles',
-      title: 'Tempo progresivo',
-      objective: 'Mejorar ritmo controlado y tolerancia al esfuerzo.',
-      distanceKm: tempoKm,
-      durationMin: 60,
-      zone: 'Z3-Z4',
-      warmup: '15 min suaves + movilidad',
-      mainSet: '3 bloques progresivos de 8 min con recuperación corta',
-      cooldown: '10 min suaves',
-      estimatedLoad: 62,
-    },
-    {
-      day: 'Sábado',
-      title: 'Tirada larga',
-      objective: 'Desarrollar resistencia específica para el objetivo.',
-      distanceKm: longKm,
-      durationMin: 90,
-      zone: 'Z2',
-      warmup: '10 min suaves',
-      mainSet: `${longKm - 2} km constantes`,
-      cooldown: '5 min caminata + movilidad',
-      estimatedLoad: 78,
-    },
-  ]
-
-  if (profile.daysPerWeek >= 4) {
-    sessions.splice(1, 0, {
-      day: 'Martes',
-      title: 'Fuerza y técnica',
-      objective: 'Mejorar economía de carrera y prevenir lesiones.',
-      durationMin: 35,
-      zone: 'Complementario',
-      warmup: 'Activación general',
-      mainSet: 'Circuito de fuerza de pierna y core + drills',
-      cooldown: 'Movilidad de cadera y tobillo',
-      estimatedLoad: 28,
-    })
-  }
-
-  if (profile.daysPerWeek >= 5) {
-    sessions.push({
-      day: 'Domingo',
-      title: 'Recuperación activa',
-      objective: 'Facilitar recuperación sin perder continuidad.',
-      distanceKm: 4,
-      durationMin: 30,
-      zone: 'Z1-Z2',
-      warmup: '5 min suaves',
-      mainSet: 'Rodaje ligero o caminata rápida',
-      cooldown: 'Movilidad ligera',
-      estimatedLoad: 18,
-    })
-  }
-
-  return sessions
-}
-
-function addDaysIso(days: number) {
-  const d = new Date()
-  d.setDate(d.getDate() + days)
-  return d.toISOString().slice(0, 10)
-}
-
-const schemaSql = `
-create table if not exists users (
-  id text primary key,
-  email text not null unique,
-  name text not null,
-  created_at text not null,
-  last_login_at text
-);
-
-create table if not exists athlete_profiles (
-  id text primary key,
-  user_id text not null,
-  experience_level text not null,
-  weekly_days_available integer not null,
-  current_weekly_volume real not null,
-  preferred_goal_type text not null,
-  notes text,
-  created_at text not null
-);
-
-create table if not exists goals (
-  id text primary key,
-  user_id text not null,
-  goal_type text not null,
-  target_distance text not null,
-  target_event_name text,
-  target_event_date text,
-  status text not null,
-  created_at text not null
-);
-
-create table if not exists subscriptions (
-  id text primary key,
-  user_id text not null,
-  plan_code text not null,
-  billing_cycle text not null,
-  status text not null,
-  started_at text not null,
-  expires_at text
-);
-
-create table if not exists training_plans (
-  id text primary key,
-  user_id text not null,
-  version integer not null,
-  status text not null,
-  start_date text,
-  end_date text,
-  plan_summary text,
-  generation_source text,
-  created_at text not null
-);
-
-create table if not exists training_weeks (
-  id text primary key,
-  training_plan_id text not null,
-  week_number integer not null,
-  focus_label text,
-  total_target_distance real,
-  notes text
-);
-
-create table if not exists training_sessions (
-  id text primary key,
-  training_week_id text not null,
-  day_of_week text,
-  session_type text,
-  title text not null,
-  objective text,
-  distance_target real,
-  duration_target integer,
-  intensity_zone text,
-  warmup_text text,
-  main_set_text text,
-  cooldown_text text,
-  estimated_load integer,
-  status text not null
-);
-`
-
-export default {
-  fetch: app.fetch,
-}
+export default app;
