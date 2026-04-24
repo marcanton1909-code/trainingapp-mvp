@@ -2,6 +2,13 @@ import { useEffect, useMemo, useState } from "react";
 
 const API_URL = "https://trainingapp-api.marco-cruz.workers.dev";
 
+const STARTER_LINK =
+  "https://www.mercadopago.com.mx/subscriptions/checkout?preapproval_plan_id=440c15210b3e4f2c9a2f77996d16d4d4";
+const PERFORMANCE_LINK =
+  "https://www.mercadopago.com.mx/subscriptions/checkout?preapproval_plan_id=7fe46a2fe0014bbcbd8068829751d70d";
+const PRO_LINK =
+  "https://www.mercadopago.com.mx/subscriptions/checkout?preapproval_plan_id=568113ea5f7747fca96e02d869a29250";
+
 type Session = {
   id?: string;
   day_of_week?: string;
@@ -25,7 +32,7 @@ type Week = {
   sessions: Session[];
 };
 
-type TabMode = "home" | "new" | "existing";
+type TabMode = "home" | "new" | "existing" | "membership";
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<TabMode>("home");
@@ -206,6 +213,10 @@ export default function App() {
     }
   };
 
+  const goToCheckout = (url: string) => {
+    window.location.href = url;
+  };
+
   return (
     <div style={pageStyle}>
       <div style={gridOverlayStyle} />
@@ -252,8 +263,8 @@ export default function App() {
                 fontSize: isMobile ? 15 : 16,
               }}
             >
-              Tu dashboard te muestra el estado actual, la sesión destacada y el
-              resumen de la semana activa.
+              Tu dashboard te muestra el estado actual, la sesión destacada, la
+              semana visible y tu opción de membresía.
             </p>
           </div>
 
@@ -276,8 +287,8 @@ export default function App() {
               <strong style={featureValueStyle}>Semana activa</strong>
             </div>
             <div style={featureCardStyle}>
-              <span style={featureLabelStyle}>Consulta</span>
-              <strong style={featureValueStyle}>Por correo</strong>
+              <span style={featureLabelStyle}>Membresía</span>
+              <strong style={featureValueStyle}>Pago mensual</strong>
             </div>
           </div>
 
@@ -315,7 +326,7 @@ export default function App() {
               ...tabsWrapStyle,
               width: isMobile ? "100%" : "fit-content",
               display: isMobile ? "grid" : "inline-flex",
-              gridTemplateColumns: isMobile ? "1fr 1fr 1fr" : undefined,
+              gridTemplateColumns: isMobile ? "1fr 1fr" : undefined,
             }}
           >
             <button
@@ -344,6 +355,15 @@ export default function App() {
               }}
             >
               Mi plan
+            </button>
+            <button
+              onClick={() => setActiveTab("membership")}
+              style={{
+                ...tabButtonStyle,
+                ...(activeTab === "membership" ? activeTabButtonStyle : {}),
+              }}
+            >
+              Membresía
             </button>
           </div>
 
@@ -437,30 +457,6 @@ export default function App() {
                   </div>
                 </div>
               </div>
-
-              {visibleWeek && (
-                <div style={{ marginTop: 22 }}>
-                  <div style={planTopBarStyle}>
-                    <h3 style={planTitleStyle}>Semana disponible</h3>
-                    <div style={planHintStyle}>La siguiente fase se desbloquea después</div>
-                  </div>
-
-                  <div style={{ marginTop: 12 }}>
-                    <button
-                      style={homeWeekCardButtonStyle}
-                      onClick={() => setActiveTab("existing")}
-                    >
-                      <div style={weekLabelStyle}>Semana {visibleWeek.week_number}</div>
-                      <div style={weekFocusStyle}>
-                        {visibleWeek.focus_label || "Bloque de entrenamiento"}
-                      </div>
-                      <div style={weekDistanceStyle}>
-                        {visibleWeek.total_target_distance ?? 0} km
-                      </div>
-                    </button>
-                  </div>
-                </div>
-              )}
             </section>
           )}
 
@@ -721,6 +717,86 @@ export default function App() {
                   ))}
                 </section>
               )}
+            </section>
+          )}
+
+          {activeTab === "membership" && (
+            <section style={{ ...cardStyle, padding: isMobile ? 20 : 28 }}>
+              <div style={sectionHeaderStyle}>
+                <span style={badgeStyle}>Membresía</span>
+                <h2 style={{ ...formTitleStyle, fontSize: isMobile ? 26 : 32 }}>
+                  Elige tu plan
+                </h2>
+                <p style={formTextStyle}>
+                  Mantén activa tu semana visible, desbloquea continuidad y realiza tu pago mensual.
+                </p>
+              </div>
+
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: isMobile ? "1fr" : "repeat(3, minmax(0, 1fr))",
+                  gap: 14,
+                }}
+              >
+                <div style={pricingCardStyle}>
+                  <div style={pricingTagStyle}>Base</div>
+                  <h3 style={pricingTitleStyle}>Starter</h3>
+                  <div style={pricingPriceStyle}>$149 MXN</div>
+                  <div style={pricingPeriodStyle}>mensual</div>
+                  <div style={pricingListStyle}>
+                    <div>• Semana activa visible</div>
+                    <div>• Plan para 5K y 10K</div>
+                    <div>• Consulta por correo</div>
+                  </div>
+                  <button
+                    style={pricingButtonStyle}
+                    onClick={() => goToCheckout(STARTER_LINK)}
+                  >
+                    Pagar
+                  </button>
+                </div>
+
+                <div style={{ ...pricingCardStyle, ...pricingFeaturedStyle }}>
+                  <div style={pricingTagStyle}>Recomendado</div>
+                  <h3 style={pricingTitleStyle}>Performance</h3>
+                  <div style={pricingPriceStyle}>$249 MXN</div>
+                  <div style={pricingPeriodStyle}>mensual</div>
+                  <div style={pricingListStyle}>
+                    <div>• 10K, 21K y 42K</div>
+                    <div>• Mejor estructura semanal</div>
+                    <div>• Sesiones y detalle completo</div>
+                  </div>
+                  <button
+                    style={pricingButtonStyle}
+                    onClick={() => goToCheckout(PERFORMANCE_LINK)}
+                  >
+                    Pagar
+                  </button>
+                </div>
+
+                <div style={pricingCardStyle}>
+                  <div style={pricingTagStyle}>Premium</div>
+                  <h3 style={pricingTitleStyle}>Pro Coach</h3>
+                  <div style={pricingPriceStyle}>$449 MXN</div>
+                  <div style={pricingPeriodStyle}>mensual</div>
+                  <div style={pricingListStyle}>
+                    <div>• Enfoque más avanzado</div>
+                    <div>• Preparación por objetivo</div>
+                    <div>• Prioridad para mejoras futuras</div>
+                  </div>
+                  <button
+                    style={pricingButtonStyle}
+                    onClick={() => goToCheckout(PRO_LINK)}
+                  >
+                    Pagar
+                  </button>
+                </div>
+              </div>
+
+              <div style={membershipNoteStyle}>
+                Ya están conectados los botones al checkout.
+              </div>
             </section>
           )}
 
@@ -1245,16 +1321,6 @@ const planHintStyle: React.CSSProperties = {
   fontSize: 13,
 };
 
-const homeWeekCardButtonStyle: React.CSSProperties = {
-  textAlign: "left",
-  borderRadius: 18,
-  border: "1px solid rgba(255,255,255,0.08)",
-  background: "rgba(255,255,255,0.03)",
-  padding: 16,
-  color: "white",
-  cursor: "pointer",
-};
-
 const weekCardStyle: React.CSSProperties = {
   borderRadius: 22,
   border: "1px solid rgba(255,255,255,0.08)",
@@ -1335,6 +1401,72 @@ const sessionObjectiveStyle: React.CSSProperties = {
   fontSize: 13,
   color: "rgba(255,255,255,0.82)",
   lineHeight: 1.5,
+};
+
+const pricingCardStyle: React.CSSProperties = {
+  borderRadius: 24,
+  border: "1px solid rgba(255,255,255,0.08)",
+  background: "rgba(255,255,255,0.03)",
+  padding: 22,
+};
+
+const pricingFeaturedStyle: React.CSSProperties = {
+  boxShadow: "0 0 0 1px rgba(214,255,77,0.18), 0 18px 40px rgba(214,255,77,0.08)",
+};
+
+const pricingTagStyle: React.CSSProperties = {
+  display: "inline-block",
+  padding: "7px 10px",
+  borderRadius: 999,
+  background: "rgba(0,230,255,0.10)",
+  color: "#00E6FF",
+  fontSize: 12,
+  fontWeight: 700,
+};
+
+const pricingTitleStyle: React.CSSProperties = {
+  marginTop: 16,
+  marginBottom: 8,
+  fontSize: 24,
+};
+
+const pricingPriceStyle: React.CSSProperties = {
+  fontSize: 34,
+  fontWeight: 800,
+  color: "#D6FF4D",
+};
+
+const pricingPeriodStyle: React.CSSProperties = {
+  color: "rgba(255,255,255,0.62)",
+  fontSize: 14,
+  marginTop: 4,
+};
+
+const pricingListStyle: React.CSSProperties = {
+  display: "grid",
+  gap: 8,
+  marginTop: 18,
+  color: "rgba(255,255,255,0.85)",
+  lineHeight: 1.5,
+  fontSize: 14,
+};
+
+const pricingButtonStyle: React.CSSProperties = {
+  marginTop: 22,
+  width: "100%",
+  background: "#D6FF4D",
+  color: "#000",
+  border: "none",
+  borderRadius: 16,
+  padding: "14px 16px",
+  fontWeight: 800,
+  cursor: "pointer",
+};
+
+const membershipNoteStyle: React.CSSProperties = {
+  marginTop: 18,
+  color: "rgba(255,255,255,0.62)",
+  fontSize: 13,
 };
 
 const modalOverlayStyle: React.CSSProperties = {
