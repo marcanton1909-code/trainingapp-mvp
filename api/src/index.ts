@@ -36,6 +36,34 @@ type SessionSeed = {
 
 const app = new Hono<{ Bindings: Bindings }>();
 
+const ALLOWED_ORIGINS = [
+  "http://localhost:5173",
+  "https://trainingapp-mvp.pages.dev",
+];
+
+function applyCors(c: Context<{ Bindings: Bindings }>) {
+  const origin = c.req.header("origin") || "";
+  const allowOrigin = ALLOWED_ORIGINS.includes(origin)
+    ? origin
+    : ALLOWED_ORIGINS[1];
+
+  c.header("Access-Control-Allow-Origin", allowOrigin);
+  c.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  c.header("Access-Control-Allow-Headers", "Content-Type, x-signature, x-request-id");
+  c.header("Access-Control-Max-Age", "86400");
+}
+
+app.use("*", async (c, next) => {
+  applyCors(c);
+
+  if (c.req.method === "OPTIONS") {
+    return c.body(null, 204);
+  }
+
+  await next();
+  applyCors(c);
+});
+
 function jsonError(c: Context<{ Bindings: Bindings }>, message: string, status = 400) {
   return c.json(
     {
@@ -248,6 +276,20 @@ async function validateMercadoPagoSignature(
   return timingSafeEqualHex(calculated, v1);
 }
 
+function inferPlanCodeFromEvent(externalId: string | null, eventType: string | null) {
+  if (!externalId) return null;
+  if (eventType === "subscription_preapproval") return "pending_plan";
+  if (eventType === "subscription_authorized_payment") return "authorized_payment";
+  return "mercadopago_plan";
+}
+
+function inferMembershipStatus(signatureValid: boolean, eventType: string | null) {
+  if (!signatureValid) return "webhook_unverified";
+  if (eventType === "subscription_preapproval") return "pending_activation";
+  if (eventType === "subscription_authorized_payment") return "active";
+  return "received";
+}
+
 app.get("/", (c) => {
   return c.json({
     ok: true,
@@ -376,6 +418,65 @@ app.post("/api/user/find", async (c) => {
     return c.json({
       ok: true,
       user,
+    });
+  } catch (error) {
+    return c.json(
+      {
+        ok: false,
+        error: error instanceof Error ? error.message : "Internal Server Error",
+      },
+      500
+    );
+  }
+});
+
+app.post("/api/membership/status", async (c) => {
+  try {
+    const body = (await c.req.json()) as { email?: string };
+    const email = normalizeEmail(body.email || "");
+
+    if (!email) {
+      return jsonError(c, "El correo es obligatorio");
+    }
+
+    const user = await c.env.DB
+      .prepare(
+        `select id, email, name
+         from users
+         where email = ?1
+         limit 1`
+      )
+      .bind(email)
+      .first();
+
+    if (!user) {
+      return c.json({
+        ok: true,
+        foundUser: false,
+        membership: null,
+      });
+    }
+
+    const membership = await c.env.DB
+      .prepare(
+        `select
+           id, user_id, provider, provider_subscription_id, plan_code,
+           status, payer_email, external_reference, started_at,
+           current_period_end, last_event_at, created_at, updated_at
+         from memberships
+         where user_id = ?1
+         order by updated_at desc
+         limit 1`
+      )
+      .bind(user.id)
+      .first();
+
+    return c.json({
+      ok: true,
+      foundUser: true,
+      user,
+      membership: membership || null,
+      accessGranted: membership?.status === "active",
     });
   } catch (error) {
     return c.json(
@@ -616,6 +717,65 @@ app.post("/api/mercadopago/webhook", async (c) => {
       )
       .run();
 
+    if (externalId) {
+      const membershipStatus = inferMembershipStatus(signatureValid, eventType);
+      const planCode = inferPlanCodeFromEvent(externalId, eventType);
+      const existingMembership = await c.env.DB
+        .prepare(
+          `select id
+           from memberships
+           where provider = ?1 and provider_subscription_id = ?2
+           limit 1`
+        )
+        .bind("mercadopago", externalId)
+        .first();
+
+      if (existingMembership?.id) {
+        await c.env.DB
+          .prepare(
+            `update memberships
+             set plan_code = ?1,
+                 status = ?2,
+                 last_event_at = ?3,
+                 updated_at = ?4
+             where id = ?5`
+          )
+          .bind(
+            planCode,
+            membershipStatus,
+            createdAt,
+            createdAt,
+            existingMembership.id
+          )
+          .run();
+      } else {
+        await c.env.DB
+          .prepare(
+            `insert into memberships (
+              id, user_id, provider, provider_subscription_id, plan_code, status,
+              payer_email, external_reference, started_at, current_period_end,
+              last_event_at, created_at, updated_at
+            ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)`
+          )
+          .bind(
+            crypto.randomUUID(),
+            null,
+            "mercadopago",
+            externalId,
+            planCode,
+            membershipStatus,
+            null,
+            null,
+            signatureValid ? createdAt : null,
+            null,
+            createdAt,
+            createdAt,
+            createdAt
+          )
+          .run();
+      }
+    }
+
     return c.json({
       ok: true,
       received: true,
@@ -632,7 +792,7 @@ app.post("/api/mercadopago/webhook", async (c) => {
     return c.json(
       {
         ok: false,
-        error: error instanceof Error ? error.message : "Webhook processing error",
+        error: error instanceof Error ? error.message : "Internal Server Error",
       },
       500
     );
