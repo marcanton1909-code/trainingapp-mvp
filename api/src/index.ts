@@ -4,6 +4,7 @@ import type { Context } from "hono";
 type Bindings = {
   DB: D1Database;
   MP_WEBHOOK_SECRET: string;
+  MP_ACCESS_TOKEN: string;
 };
 
 type AthleteProfileInput = {
@@ -32,6 +33,25 @@ type SessionSeed = {
   cooldown_text: string;
   estimated_load: number;
   status: string;
+};
+
+type MercadoPagoPreapproval = {
+  id?: string;
+  status?: string;
+  reason?: string;
+  external_reference?: string | null;
+  payer_email?: string | null;
+  preapproval_plan_id?: string | null;
+  auto_recurring?: {
+    frequency?: number;
+    frequency_type?: string;
+    start_date?: string;
+    end_date?: string;
+    currency_id?: string;
+    transaction_amount?: number;
+  } | null;
+  date_created?: string;
+  last_modified?: string;
 };
 
 const app = new Hono<{ Bindings: Bindings }>();
@@ -72,13 +92,7 @@ function jsonError(
   message: string,
   status = 400
 ) {
-  return c.json(
-    {
-      ok: false,
-      error: message,
-    },
-    status
-  );
+  return c.json({ ok: false, error: message }, status);
 }
 
 function normalizeEmail(email: string) {
@@ -306,6 +320,30 @@ function inferMembershipStatus(signatureValid: boolean, eventType: string | null
   if (eventType === "subscription_preapproval") return "pending_activation";
   if (eventType === "subscription_authorized_payment") return "active";
   return "received";
+}
+
+async function fetchMercadoPagoPreapproval(
+  accessToken: string,
+  preapprovalId: string
+): Promise<MercadoPagoPreapproval | null> {
+  if (!accessToken || !preapprovalId) return null;
+
+  const response = await fetch(
+    `https://api.mercadopago.com/preapproval/${preapprovalId}`,
+    {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+    }
+  );
+
+  if (!response.ok) {
+    return null;
+  }
+
+  return (await response.json()) as MercadoPagoPreapproval;
 }
 
 app.get("/", (c) => {
@@ -692,7 +730,8 @@ app.post("/api/mercadopago/webhook", async (c) => {
     const rawBody = await c.req.text();
     const xSignature = c.req.header("x-signature") || "";
     const xRequestId = c.req.header("x-request-id") || "";
-    const secret = c.env.MP_WEBHOOK_SECRET || "";
+    const webhookSecret = c.env.MP_WEBHOOK_SECRET || "";
+    const accessToken = c.env.MP_ACCESS_TOKEN || "";
 
     let parsedBody: { type?: string; data?: { id?: string } } = {};
 
@@ -703,7 +742,7 @@ app.post("/api/mercadopago/webhook", async (c) => {
     }
 
     const signatureValid = await validateMercadoPagoSignature(
-      secret,
+      webhookSecret,
       xSignature,
       xRequestId,
       rawBody
@@ -733,9 +772,45 @@ app.post("/api/mercadopago/webhook", async (c) => {
       )
       .run();
 
+    let mpSubscription: MercadoPagoPreapproval | null = null;
+    if (externalId && accessToken) {
+      mpSubscription = await fetchMercadoPagoPreapproval(accessToken, externalId);
+    }
+
+    const payerEmail = normalizeEmail(mpSubscription?.payer_email || "");
+    const externalReference = mpSubscription?.external_reference || null;
+    const planCode =
+      mpSubscription?.preapproval_plan_id ||
+      inferPlanCodeFromEvent(externalId, eventType);
+    const membershipStatus = signatureValid
+      ? mpSubscription?.status || inferMembershipStatus(signatureValid, eventType)
+      : inferMembershipStatus(signatureValid, eventType);
+
+    let linkedUserId: string | null = null;
+
+    if (payerEmail) {
+      const matchedUser = await c.env.DB
+        .prepare(`select id from users where email = ?1 limit 1`)
+        .bind(payerEmail)
+        .first<{ id: string }>();
+
+      if (matchedUser?.id) {
+        linkedUserId = matchedUser.id;
+      }
+    }
+
+    if (!linkedUserId && externalReference) {
+      const matchedUserByReference = await c.env.DB
+        .prepare(`select id from users where id = ?1 limit 1`)
+        .bind(externalReference)
+        .first<{ id: string }>();
+
+      if (matchedUserByReference?.id) {
+        linkedUserId = matchedUserByReference.id;
+      }
+    }
+
     if (externalId) {
-      const membershipStatus = inferMembershipStatus(signatureValid, eventType);
-      const planCode = inferPlanCodeFromEvent(externalId, eventType);
       const existingMembership = await c.env.DB
         .prepare(
           `select id
@@ -744,21 +819,31 @@ app.post("/api/mercadopago/webhook", async (c) => {
            limit 1`
         )
         .bind("mercadopago", externalId)
-        .first();
+        .first<{ id: string }>();
 
       if (existingMembership?.id) {
         await c.env.DB
           .prepare(
             `update memberships
-             set plan_code = ?1,
-                 status = ?2,
-                 last_event_at = ?3,
-                 updated_at = ?4
-             where id = ?5`
+             set user_id = coalesce(?1, user_id),
+                 plan_code = ?2,
+                 status = ?3,
+                 payer_email = coalesce(?4, payer_email),
+                 external_reference = coalesce(?5, external_reference),
+                 started_at = coalesce(?6, started_at),
+                 current_period_end = ?7,
+                 last_event_at = ?8,
+                 updated_at = ?9
+             where id = ?10`
           )
           .bind(
+            linkedUserId,
             planCode,
             membershipStatus,
+            payerEmail || null,
+            externalReference,
+            mpSubscription?.date_created || null,
+            mpSubscription?.auto_recurring?.end_date || null,
             createdAt,
             createdAt,
             existingMembership.id
@@ -775,15 +860,15 @@ app.post("/api/mercadopago/webhook", async (c) => {
           )
           .bind(
             crypto.randomUUID(),
-            null,
+            linkedUserId,
             "mercadopago",
             externalId,
             planCode,
             membershipStatus,
-            null,
-            null,
-            signatureValid ? createdAt : null,
-            null,
+            payerEmail || null,
+            externalReference,
+            mpSubscription?.date_created || null,
+            mpSubscription?.auto_recurring?.end_date || null,
             createdAt,
             createdAt,
             createdAt
@@ -798,17 +883,24 @@ app.post("/api/mercadopago/webhook", async (c) => {
       stored: true,
       hasSignature: Boolean(xSignature),
       hasRequestId: Boolean(xRequestId),
-      hasSecret: Boolean(secret),
+      hasSecret: Boolean(webhookSecret),
+      hasAccessToken: Boolean(accessToken),
       signatureValid,
       eventId,
       eventType,
       externalId,
+      linkedUserId,
+      payerEmail: payerEmail || null,
+      externalReference,
+      mercadoPagoStatus: mpSubscription?.status || null,
+      mercadoPagoPlanId: mpSubscription?.preapproval_plan_id || null,
     });
   } catch (error) {
     return c.json(
       {
         ok: false,
-        error: error instanceof Error ? error.message : "Internal Server Error",
+        error:
+          error instanceof Error ? error.message : "Internal Server Error",
       },
       500
     );
