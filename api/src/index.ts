@@ -21,6 +21,7 @@ type AthleteProfileInput = {
 
 type SessionSeed = {
   day_of_week: string;
+  session_type: string;
   title: string;
   objective: string;
   distance_target: number | null;
@@ -31,7 +32,6 @@ type SessionSeed = {
   cooldown_text: string;
   estimated_load: number;
   status: string;
-  sort_order: number;
 };
 
 const app = new Hono<{ Bindings: Bindings }>();
@@ -49,7 +49,10 @@ function applyCors(c: Context<{ Bindings: Bindings }>) {
 
   c.header("Access-Control-Allow-Origin", allowOrigin);
   c.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  c.header("Access-Control-Allow-Headers", "Content-Type, x-signature, x-request-id");
+  c.header(
+    "Access-Control-Allow-Headers",
+    "Content-Type, x-signature, x-request-id"
+  );
   c.header("Access-Control-Max-Age", "86400");
 }
 
@@ -64,7 +67,11 @@ app.use("*", async (c, next) => {
   applyCors(c);
 });
 
-function jsonError(c: Context<{ Bindings: Bindings }>, message: string, status = 400) {
+function jsonError(
+  c: Context<{ Bindings: Bindings }>,
+  message: string,
+  status = 400
+) {
   return c.json(
     {
       ok: false,
@@ -93,7 +100,11 @@ function validateProfile(body: AthleteProfileInput) {
   if (!body.email.includes("@")) throw new Error("El correo no es válido");
   if (!body.goal?.trim()) throw new Error("El objetivo es obligatorio");
   if (!body.distance?.trim()) throw new Error("La distancia es obligatoria");
-  if (!Number.isFinite(body.daysPerWeek) || body.daysPerWeek < 1 || body.daysPerWeek > 7) {
+  if (
+    !Number.isFinite(body.daysPerWeek) ||
+    body.daysPerWeek < 1 ||
+    body.daysPerWeek > 7
+  ) {
     throw new Error("Los días por semana deben estar entre 1 y 7");
   }
   if (!body.level?.trim()) throw new Error("El nivel es obligatorio");
@@ -106,7 +117,10 @@ function roundToHalf(value: number) {
   return Math.round(value * 2) / 2;
 }
 
-function buildSessionsForWeek(input: AthleteProfileInput, weekNumber: number): SessionSeed[] {
+function buildSessionsForWeek(
+  input: AthleteProfileInput,
+  weekNumber: number
+): SessionSeed[] {
   const distance = normalizeDistance(input.distance);
   const baseVolume = Math.max(6, input.currentVolumeKm || 8);
   const growthFactor = weekNumber === 4 ? 0.82 : 1 + (weekNumber - 1) * 0.08;
@@ -116,12 +130,16 @@ function buildSessionsForWeek(input: AthleteProfileInput, weekNumber: number): S
   const qualityRun = roundToHalf(Math.max(4, weeklyVolume * 0.22));
   const longRun = roundToHalf(
     Math.min(
-      distance >= 21 ? Math.max(8, weeklyVolume * 0.42) : Math.max(6, weeklyVolume * 0.36),
+      distance >= 21
+        ? Math.max(8, weeklyVolume * 0.42)
+        : Math.max(6, weeklyVolume * 0.36),
       distance >= 42 ? 28 : distance >= 21 ? 18 : distance >= 10 ? 12 : 10
     )
   );
 
-  const recoveryRun = roundToHalf(Math.max(3, weeklyVolume - easyRun - qualityRun - longRun));
+  const recoveryRun = roundToHalf(
+    Math.max(3, weeklyVolume - easyRun - qualityRun - longRun)
+  );
   const sessions: SessionSeed[] = [];
 
   const easyDuration = Math.round(easyRun * 6.5);
@@ -131,6 +149,7 @@ function buildSessionsForWeek(input: AthleteProfileInput, weekNumber: number): S
 
   sessions.push({
     day_of_week: "Lunes",
+    session_type: "easy_run",
     title: "Rodaje suave",
     objective: "Construir base aeróbica y mantener constancia sin fatiga excesiva.",
     distance_target: easyRun,
@@ -141,11 +160,11 @@ function buildSessionsForWeek(input: AthleteProfileInput, weekNumber: number): S
     cooldown_text: "5 min trote muy suave + estiramientos ligeros",
     estimated_load: Math.round(easyDuration * 0.9),
     status: "planned",
-    sort_order: 1,
   });
 
   sessions.push({
     day_of_week: "Miércoles",
+    session_type: input.goal === "Mejorar tiempo" ? "quality" : "tempo",
     title: input.goal === "Mejorar tiempo" ? "Trabajo de calidad" : "Ritmo controlado",
     objective:
       input.goal === "Mejorar tiempo"
@@ -162,11 +181,11 @@ function buildSessionsForWeek(input: AthleteProfileInput, weekNumber: number): S
     cooldown_text: "8 min trote suave",
     estimated_load: Math.round(qualityDuration * 1.15),
     status: "planned",
-    sort_order: 2,
   });
 
   sessions.push({
     day_of_week: "Viernes",
+    session_type: "recovery",
     title: "Rodaje de recuperación",
     objective: "Promover recuperación activa sin perder volumen semanal.",
     distance_target: recoveryRun,
@@ -177,11 +196,11 @@ function buildSessionsForWeek(input: AthleteProfileInput, weekNumber: number): S
     cooldown_text: "Movilidad ligera y respiración",
     estimated_load: Math.round(recoveryDuration * 0.75),
     status: "planned",
-    sort_order: 3,
   });
 
   sessions.push({
     day_of_week: "Domingo",
+    session_type: "long_run",
     title: "Tirada larga",
     objective:
       distance >= 21
@@ -195,7 +214,6 @@ function buildSessionsForWeek(input: AthleteProfileInput, weekNumber: number): S
     cooldown_text: "Caminata ligera + estiramientos suaves",
     estimated_load: Math.round(longDuration * 1.2),
     status: "planned",
-    sort_order: 4,
   });
 
   return sessions;
@@ -219,6 +237,7 @@ function buildPlanStructure(input: AthleteProfileInput) {
       week_number: weekNumber,
       focus_label: weekLabels[weekNumber - 1] || "Bloque de entrenamiento",
       total_target_distance: totalTargetDistance,
+      notes: null as string | null,
       sessions,
     };
   });
@@ -266,7 +285,6 @@ async function validateMercadoPagoSignature(
   }
 
   const { ts, v1 } = extractTsAndV1(signatureHeader);
-
   if (!ts || !v1) return false;
 
   const manifest = `id:${requestId};request-id:${requestId};ts:${ts};`;
@@ -291,17 +309,11 @@ function inferMembershipStatus(signatureValid: boolean, eventType: string | null
 }
 
 app.get("/", (c) => {
-  return c.json({
-    ok: true,
-    service: "trainingapp-api",
-  });
+  return c.json({ ok: true, service: "trainingapp-api" });
 });
 
 app.get("/api/health", (c) => {
-  return c.json({
-    ok: true,
-    status: "healthy",
-  });
+  return c.json({ ok: true, status: "healthy" });
 });
 
 app.post("/api/onboarding", async (c) => {
@@ -317,10 +329,7 @@ app.post("/api/onboarding", async (c) => {
 
     if (existingUser) {
       return c.json(
-        {
-          ok: false,
-          error: "Ese correo ya fue registrado anteriormente",
-        },
+        { ok: false, error: "Ese correo ya fue registrado anteriormente" },
         409
       );
     }
@@ -397,9 +406,7 @@ app.post("/api/user/find", async (c) => {
     const body = (await c.req.json()) as { email?: string };
     const email = normalizeEmail(body.email || "");
 
-    if (!email) {
-      return jsonError(c, "El correo es obligatorio");
-    }
+    if (!email) return jsonError(c, "El correo es obligatorio");
 
     const user = await c.env.DB
       .prepare(
@@ -415,10 +422,7 @@ app.post("/api/user/find", async (c) => {
       return jsonError(c, "No se encontró un usuario con ese correo", 404);
     }
 
-    return c.json({
-      ok: true,
-      user,
-    });
+    return c.json({ ok: true, user });
   } catch (error) {
     return c.json(
       {
@@ -435,9 +439,7 @@ app.post("/api/membership/status", async (c) => {
     const body = (await c.req.json()) as { email?: string };
     const email = normalizeEmail(body.email || "");
 
-    if (!email) {
-      return jsonError(c, "El correo es obligatorio");
-    }
+    if (!email) return jsonError(c, "El correo es obligatorio");
 
     const user = await c.env.DB
       .prepare(
@@ -511,14 +513,27 @@ app.post("/api/plan/generate", async (c) => {
     const planId = crypto.randomUUID();
     const createdAt = new Date().toISOString();
     const weeks = buildPlanStructure(body);
+    const eventDate = body.eventDate?.trim() || null;
+    const startDate = createdAt.slice(0, 10);
 
     const batchStatements = [
       c.env.DB
         .prepare(
-          `insert into training_plans (id, user_id, name, status, created_at)
-           values (?1, ?2, ?3, 'active', ?4)`
+          `insert into training_plans (
+            id, user_id, version, status, start_date, end_date, plan_summary, generation_source, created_at
+          ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)`
         )
-        .bind(planId, body.userId, `Plan ${body.distance.trim()} - ${body.goal.trim()}`, createdAt),
+        .bind(
+          planId,
+          body.userId,
+          1,
+          "active",
+          startDate,
+          eventDate,
+          `Plan ${body.distance.trim()} - ${body.goal.trim()}`,
+          "trainingapp-api",
+          createdAt
+        ),
     ];
 
     for (const week of weeks) {
@@ -528,7 +543,7 @@ app.post("/api/plan/generate", async (c) => {
         c.env.DB
           .prepare(
             `insert into training_weeks (
-              id, plan_id, week_number, focus_label, total_target_distance, created_at
+              id, training_plan_id, week_number, focus_label, total_target_distance, notes
             ) values (?1, ?2, ?3, ?4, ?5, ?6)`
           )
           .bind(
@@ -537,7 +552,7 @@ app.post("/api/plan/generate", async (c) => {
             week.week_number,
             week.focus_label,
             week.total_target_distance,
-            createdAt
+            week.notes
           )
       );
 
@@ -548,21 +563,22 @@ app.post("/api/plan/generate", async (c) => {
           c.env.DB
             .prepare(
               `insert into training_sessions (
-                id, week_id, day_of_week, title, objective,
+                id, training_week_id, day_of_week, session_type, title, objective,
                 distance_target, duration_target, intensity_zone,
                 warmup_text, main_set_text, cooldown_text,
-                estimated_load, status, sort_order, created_at
+                estimated_load, status
               ) values (
-                ?1, ?2, ?3, ?4, ?5,
-                ?6, ?7, ?8,
-                ?9, ?10, ?11,
-                ?12, ?13, ?14, ?15
+                ?1, ?2, ?3, ?4, ?5, ?6,
+                ?7, ?8, ?9,
+                ?10, ?11, ?12,
+                ?13, ?14
               )`
             )
             .bind(
               sessionId,
               weekId,
               session.day_of_week,
+              session.session_type,
               session.title,
               session.objective,
               session.distance_target,
@@ -572,9 +588,7 @@ app.post("/api/plan/generate", async (c) => {
               session.main_set_text,
               session.cooldown_text,
               session.estimated_load,
-              session.status,
-              session.sort_order,
-              createdAt
+              session.status
             )
         );
       }
@@ -605,7 +619,8 @@ app.get("/api/plan/:userId", async (c) => {
 
     const plan = await c.env.DB
       .prepare(
-        `select id, user_id, name, status, created_at
+        `select
+           id, user_id, version, status, start_date, end_date, plan_summary, generation_source, created_at
          from training_plans
          where user_id = ?1
          order by created_at desc
@@ -620,9 +635,9 @@ app.get("/api/plan/:userId", async (c) => {
 
     const weekRows = await c.env.DB
       .prepare(
-        `select id, week_number, focus_label, total_target_distance
+        `select id, week_number, focus_label, total_target_distance, notes
          from training_weeks
-         where plan_id = ?1
+         where training_plan_id = ?1
          order by week_number asc`
       )
       .bind(plan.id)
@@ -635,13 +650,13 @@ app.get("/api/plan/:userId", async (c) => {
       const sessionRows = await c.env.DB
         .prepare(
           `select
-             id, day_of_week, title, objective,
+             id, day_of_week, session_type, title, objective,
              distance_target, duration_target, intensity_zone,
              warmup_text, main_set_text, cooldown_text,
-             estimated_load, status, sort_order
+             estimated_load, status
            from training_sessions
-           where week_id = ?1
-           order by sort_order asc, created_at asc`
+           where training_week_id = ?1
+           order by rowid asc`
         )
         .bind(week.id)
         .all();
@@ -651,6 +666,7 @@ app.get("/api/plan/:userId", async (c) => {
         week_number: week.week_number,
         focus_label: week.focus_label,
         total_target_distance: week.total_target_distance,
+        notes: week.notes,
         sessions: sessionRows.results || [],
       });
     }
