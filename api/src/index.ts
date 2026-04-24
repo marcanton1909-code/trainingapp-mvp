@@ -527,13 +527,48 @@ app.post("/api/mercadopago/webhook", async (c) => {
     const xRequestId = c.req.header("x-request-id") || "";
     const secret = c.env.MP_WEBHOOK_SECRET || "";
 
+    let parsedBody: { type?: string; data?: { id?: string } } = {};
+
+    try {
+      parsedBody = JSON.parse(rawBody);
+    } catch {
+      parsedBody = {};
+    }
+
+    const eventId = crypto.randomUUID();
+    const createdAt = new Date().toISOString();
+    const eventType = parsedBody.type || null;
+    const externalId = parsedBody.data?.id || null;
+
+    await c.env.DB
+      .prepare(
+        `insert into webhook_events (
+          id, provider, event_type, external_id, request_id,
+          signature_present, payload, created_at
+        ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)`
+      )
+      .bind(
+        eventId,
+        "mercadopago",
+        eventType,
+        externalId,
+        xRequestId || null,
+        xSignature ? 1 : 0,
+        rawBody,
+        createdAt
+      )
+      .run();
+
     return c.json({
       ok: true,
       received: true,
+      stored: true,
       hasSignature: Boolean(xSignature),
       hasRequestId: Boolean(xRequestId),
       hasSecret: Boolean(secret),
-      bodyLength: rawBody.length,
+      eventId,
+      eventType,
+      externalId,
     });
   } catch (error) {
     return c.json(
