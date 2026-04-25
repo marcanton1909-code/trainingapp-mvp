@@ -311,14 +311,21 @@ async function validateMercadoPagoSignature(
   return timingSafeEqualHex(calculated, v1);
 }
 
-function inferPlanCodeFromEvent(externalId: string | null, eventType: string | null) {
+function inferPlanCodeFromEvent(
+  externalId: string | null,
+  eventType: string | null
+) {
   if (!externalId) return null;
   if (eventType === "subscription_preapproval") return "pending_plan";
-  if (eventType === "subscription_authorized_payment") return "authorized_payment";
+  if (eventType === "subscription_authorized_payment")
+    return "authorized_payment";
   return "mercadopago_plan";
 }
 
-function inferMembershipStatus(signatureValid: boolean, eventType: string | null) {
+function inferMembershipStatus(
+  signatureValid: boolean,
+  eventType: string | null
+) {
   if (!signatureValid) return "webhook_unverified";
   if (eventType === "subscription_preapproval") return "pending_activation";
   if (eventType === "subscription_authorized_payment") return "active";
@@ -355,6 +362,13 @@ app.get("/", (c) => {
 
 app.get("/api/health", (c) => {
   return c.json({ ok: true, status: "healthy" });
+});
+
+app.get("/api/conekta/config", (c) => {
+  return c.json({
+    ok: true,
+    publicKey: c.env.CONEKTA_PUBLIC_KEY || "",
+  });
 });
 
 app.post("/api/onboarding", async (c) => {
@@ -435,7 +449,8 @@ app.post("/api/onboarding", async (c) => {
     return c.json(
       {
         ok: false,
-        error: error instanceof Error ? error.message : "Internal Server Error",
+        error:
+          error instanceof Error ? error.message : "Internal Server Error",
       },
       500
     );
@@ -468,7 +483,8 @@ app.post("/api/user/find", async (c) => {
     return c.json(
       {
         ok: false,
-        error: error instanceof Error ? error.message : "Internal Server Error",
+        error:
+          error instanceof Error ? error.message : "Internal Server Error",
       },
       500
     );
@@ -525,7 +541,8 @@ app.post("/api/membership/status", async (c) => {
     return c.json(
       {
         ok: false,
-        error: error instanceof Error ? error.message : "Internal Server Error",
+        error:
+          error instanceof Error ? error.message : "Internal Server Error",
       },
       500
     );
@@ -647,7 +664,8 @@ app.post("/api/plan/generate", async (c) => {
     return c.json(
       {
         ok: false,
-        error: error instanceof Error ? error.message : "Internal Server Error",
+        error:
+          error instanceof Error ? error.message : "Internal Server Error",
       },
       500
     );
@@ -721,7 +739,8 @@ app.get("/api/plan/:userId", async (c) => {
     return c.json(
       {
         ok: false,
-        error: error instanceof Error ? error.message : "Internal Server Error",
+        error:
+          error instanceof Error ? error.message : "Internal Server Error",
       },
       500
     );
@@ -777,7 +796,10 @@ app.post("/api/mercadopago/webhook", async (c) => {
 
     let mpSubscription: MercadoPagoPreapproval | null = null;
     if (externalId && accessToken) {
-      mpSubscription = await fetchMercadoPagoPreapproval(accessToken, externalId);
+      mpSubscription = await fetchMercadoPagoPreapproval(
+        accessToken,
+        externalId
+      );
     }
 
     const payerEmail = normalizeEmail(mpSubscription?.payer_email || "");
@@ -786,7 +808,8 @@ app.post("/api/mercadopago/webhook", async (c) => {
       mpSubscription?.preapproval_plan_id ||
       inferPlanCodeFromEvent(externalId, eventType);
     const membershipStatus = signatureValid
-      ? mpSubscription?.status || inferMembershipStatus(signatureValid, eventType)
+      ? mpSubscription?.status ||
+        inferMembershipStatus(signatureValid, eventType)
       : inferMembershipStatus(signatureValid, eventType);
 
     let linkedUserId: string | null = null;
