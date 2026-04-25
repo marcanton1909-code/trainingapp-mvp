@@ -5,6 +5,8 @@ type Bindings = {
   DB: D1Database;
   MP_WEBHOOK_SECRET: string;
   MP_ACCESS_TOKEN: string;
+  CONEKTA_PRIVATE_KEY: string;
+  CONEKTA_PUBLIC_KEY: string;
 };
 
 type AthleteProfileInput = {
@@ -179,7 +181,8 @@ function buildSessionsForWeek(
   sessions.push({
     day_of_week: "Miércoles",
     session_type: input.goal === "Mejorar tiempo" ? "quality" : "tempo",
-    title: input.goal === "Mejorar tiempo" ? "Trabajo de calidad" : "Ritmo controlado",
+    title:
+      input.goal === "Mejorar tiempo" ? "Trabajo de calidad" : "Ritmo controlado",
     objective:
       input.goal === "Mejorar tiempo"
         ? "Desarrollar velocidad controlada y tolerancia al esfuerzo."
@@ -885,6 +888,8 @@ app.post("/api/mercadopago/webhook", async (c) => {
       hasRequestId: Boolean(xRequestId),
       hasSecret: Boolean(webhookSecret),
       hasAccessToken: Boolean(accessToken),
+      hasConektaPrivateKey: Boolean(c.env.CONEKTA_PRIVATE_KEY),
+      hasConektaPublicKey: Boolean(c.env.CONEKTA_PUBLIC_KEY),
       signatureValid,
       eventId,
       eventType,
