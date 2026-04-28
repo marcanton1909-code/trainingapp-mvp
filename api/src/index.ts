@@ -373,6 +373,13 @@ app.get("/api/conekta/config", (c) => {
   });
 });
 
+app.get("/api/paypal/config", (c) => {
+  return c.json({
+    ok: true,
+    clientId: c.env.PAYPAL_CLIENT_ID || "",
+  });
+});
+
 app.post("/api/onboarding", async (c) => {
   try {
     const body = (await c.req.json()) as AthleteProfileInput;
