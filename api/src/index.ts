@@ -58,12 +58,37 @@ type MercadoPagoPreapproval = {
   last_modified?: string;
 };
 
+type PayPalAccessTokenResponse = {
+  access_token: string;
+  token_type: string;
+  app_id?: string;
+  expires_in?: number;
+  nonce?: string;
+};
+
+type PayPalProductResponse = {
+  id: string;
+  name?: string;
+  description?: string;
+  type?: string;
+  category?: string;
+};
+
+type PayPalPlanResponse = {
+  id: string;
+  product_id?: string;
+  name?: string;
+  status?: string;
+};
+
 const app = new Hono<{ Bindings: Bindings }>();
 
 const ALLOWED_ORIGINS = [
   "http://localhost:5173",
   "https://trainingapp-mvp.pages.dev",
 ];
+
+const PAYPAL_BASE_URL = "https://api-m.sandbox.paypal.com";
 
 function applyCors(c: Context<{ Bindings: Bindings }>) {
   const origin = c.req.header("origin") || "";
