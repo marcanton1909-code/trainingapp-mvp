@@ -7,6 +7,8 @@ type Bindings = {
   MP_ACCESS_TOKEN: string;
   CONEKTA_PRIVATE_KEY: string;
   CONEKTA_PUBLIC_KEY: string;
+  PAYPAL_CLIENT_ID: string;
+  PAYPAL_SECRET: string;
 };
 
 type AthleteProfileInput = {
@@ -913,6 +915,8 @@ app.post("/api/mercadopago/webhook", async (c) => {
       hasAccessToken: Boolean(accessToken),
       hasConektaPrivateKey: Boolean(c.env.CONEKTA_PRIVATE_KEY),
       hasConektaPublicKey: Boolean(c.env.CONEKTA_PUBLIC_KEY),
+      hasPaypalClientId: Boolean(c.env.PAYPAL_CLIENT_ID),
+      hasPaypalSecret: Boolean(c.env.PAYPAL_SECRET),
       signatureValid,
       eventId,
       eventType,
