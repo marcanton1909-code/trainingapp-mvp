@@ -383,6 +383,107 @@ async function fetchMercadoPagoPreapproval(
   return (await response.json()) as MercadoPagoPreapproval;
 }
 
+async function getPayPalAccessToken(
+  clientId: string,
+  secret: string
+): Promise<string> {
+  const auth = btoa(`${clientId}:${secret}`);
+
+  const response = await fetch(`${PAYPAL_BASE_URL}/v1/oauth2/token`, {
+    method: "POST",
+    headers: {
+      Authorization: `Basic ${auth}`,
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: "grant_type=client_credentials",
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`PayPal OAuth error: ${errorText}`);
+  }
+
+  const data = (await response.json()) as PayPalAccessTokenResponse;
+  return data.access_token;
+}
+
+async function createPayPalProduct(
+  accessToken: string
+): Promise<PayPalProductResponse> {
+  const response = await fetch(`${PAYPAL_BASE_URL}/v1/catalogs/products`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+      Prefer: "return=representation",
+    },
+    body: JSON.stringify({
+      name: "trAIning Memberships",
+      description: "Planes de suscripción mensual para entrenamiento running",
+      type: "SERVICE",
+      category: "SOFTWARE",
+    }),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`PayPal product error: ${errorText}`);
+  }
+
+  return (await response.json()) as PayPalProductResponse;
+}
+
+async function createPayPalPlan(
+  accessToken: string,
+  productId: string,
+  name: string,
+  description: string,
+  amount: string
+): Promise<PayPalPlanResponse> {
+  const response = await fetch(`${PAYPAL_BASE_URL}/v1/billing/plans`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+      Prefer: "return=representation",
+    },
+    body: JSON.stringify({
+      product_id: productId,
+      name,
+      description,
+      billing_cycles: [
+        {
+          frequency: {
+            interval_unit: "MONTH",
+            interval_count: 1,
+          },
+          tenure_type: "REGULAR",
+          sequence: 1,
+          total_cycles: 0,
+          pricing_scheme: {
+            fixed_price: {
+              value: amount,
+              currency_code: "MXN",
+            },
+          },
+        },
+      ],
+      payment_preferences: {
+        auto_bill_outstanding: true,
+        setup_fee_failure_action: "CONTINUE",
+        payment_failure_threshold: 3,
+      },
+    }),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`PayPal plan error: ${errorText}`);
+  }
+
+  return (await response.json()) as PayPalPlanResponse;
+}
+
 app.get("/", (c) => {
   return c.json({ ok: true, service: "trainingapp-api" });
 });
@@ -403,6 +504,63 @@ app.get("/api/paypal/config", (c) => {
     ok: true,
     clientId: c.env.PAYPAL_CLIENT_ID || "",
   });
+});
+
+app.post("/api/paypal/bootstrap-plans", async (c) => {
+  try {
+    const clientId = c.env.PAYPAL_CLIENT_ID || "";
+    const secret = c.env.PAYPAL_SECRET || "";
+
+    if (!clientId || !secret) {
+      return jsonError(c, "Faltan credenciales de PayPal", 500);
+    }
+
+    const accessToken = await getPayPalAccessToken(clientId, secret);
+    const product = await createPayPalProduct(accessToken);
+
+    const starterPlan = await createPayPalPlan(
+      accessToken,
+      product.id,
+      "Starter",
+      "Plan mensual Starter trAIning",
+      "149"
+    );
+
+    const performancePlan = await createPayPalPlan(
+      accessToken,
+      product.id,
+      "Performance",
+      "Plan mensual Performance trAIning",
+      "249"
+    );
+
+    const proCoachPlan = await createPayPalPlan(
+      accessToken,
+      product.id,
+      "Pro Coach",
+      "Plan mensual Pro Coach trAIning",
+      "449"
+    );
+
+    return c.json({
+      ok: true,
+      environment: "sandbox",
+      product,
+      plans: {
+        starter: starterPlan,
+        performance: performancePlan,
+        proCoach: proCoachPlan,
+      },
+    });
+  } catch (error) {
+    return c.json(
+      {
+        ok: false,
+        error: error instanceof Error ? error.message : "PayPal bootstrap error",
+      },
+      500
+    );
+  }
 });
 
 app.post("/api/onboarding", async (c) => {
