@@ -147,6 +147,7 @@ const app = new Hono<{ Bindings: Bindings }>();
 const ALLOWED_ORIGINS = [
   "http://localhost:5173",
   "https://trainingapp-mvp.pages.dev",
+  "https://app.trainingapp.run",
 ];
 
 const PAYPAL_BASE_URL = "https://api-m.sandbox.paypal.com";
