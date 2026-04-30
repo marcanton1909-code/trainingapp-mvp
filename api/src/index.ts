@@ -81,6 +81,67 @@ type PayPalPlanResponse = {
   status?: string;
 };
 
+type PayPalWebhookEvent = {
+  id?: string;
+  event_type?: string;
+  resource_type?: string;
+  summary?: string;
+  create_time?: string;
+  resource?: {
+    id?: string;
+    plan_id?: string;
+    status?: string;
+    custom_id?: string;
+    start_time?: string;
+    subscriber?: {
+      email_address?: string;
+      payer_id?: string;
+      name?: {
+        given_name?: string;
+        surname?: string;
+      };
+    };
+    billing_info?: {
+      next_billing_time?: string;
+      last_payment?: {
+        amount?: {
+          currency_code?: string;
+          value?: string;
+        };
+        time?: string;
+      };
+      failed_payments_count?: number;
+    };
+  };
+};
+
+type PayPalSubscriptionDetail = {
+  id?: string;
+  plan_id?: string;
+  status?: string;
+  custom_id?: string;
+  start_time?: string;
+  subscriber?: {
+    email_address?: string;
+    payer_id?: string;
+    name?: {
+      given_name?: string;
+      surname?: string;
+    };
+  };
+  billing_info?: {
+    next_billing_time?: string;
+    failed_payments_count?: number;
+    last_payment?: {
+      amount?: {
+        currency_code?: string;
+        value?: string;
+      };
+      time?: string;
+    };
+  };
+};
+
 const app = new Hono<{ Bindings: Bindings }>();
 
 const ALLOWED_ORIGINS = [
@@ -482,6 +543,53 @@ async function createPayPalPlan(
   }
 
   return (await response.json()) as PayPalPlanResponse;
+}
+
+async function fetchPayPalSubscriptionDetail(
+  accessToken: string,
+  subscriptionId: string
+): Promise<PayPalSubscriptionDetail | null> {
+  if (!accessToken || !subscriptionId) return null;
+
+  const response = await fetch(
+    `${PAYPAL_BASE_URL}/v1/billing/subscriptions/${subscriptionId}`,
+    {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+    }
+  );
+
+  if (!response.ok) {
+    return null;
+  }
+
+  return (await response.json()) as PayPalSubscriptionDetail;
+}
+
+function mapPayPalPlanCode(planId: string | null) {
+  if (!planId) return null;
+
+  if (planId === "P-8NB63062HL487521UNHYRSJI") return "starter";
+  if (planId === "P-4C338724PN8826316NHYRSJQ") return "performance";
+  if (planId === "P-2G5092788J304935ENHYRSJQ") return "pro_coach";
+
+  return planId;
+}
+
+function mapPayPalMembershipStatus(paypalStatus: string | null | undefined) {
+  const status = (paypalStatus || "").toUpperCase();
+
+  if (status === "ACTIVE") return "active";
+  if (status === "APPROVAL_PENDING") return "pending_activation";
+  if (status === "APPROVED") return "pending_activation";
+  if (status === "SUSPENDED") return "suspended";
+  if (status === "CANCELLED") return "cancelled";
+  if (status === "EXPIRED") return "expired";
+
+  return "received";
 }
 
 app.get("/", (c) => {
@@ -933,6 +1041,202 @@ app.get("/api/plan/:userId", async (c) => {
         ok: false,
         error:
           error instanceof Error ? error.message : "Internal Server Error",
+      },
+      500
+    );
+  }
+});
+
+app.post("/api/paypal/webhook", async (c) => {
+  try {
+    const rawBody = await c.req.text();
+    const createdAt = new Date().toISOString();
+
+    let parsedBody: PayPalWebhookEvent = {};
+
+    try {
+      parsedBody = JSON.parse(rawBody) as PayPalWebhookEvent;
+    } catch {
+      parsedBody = {};
+    }
+
+    const paypalEventId = parsedBody.id || crypto.randomUUID();
+    const eventType = parsedBody.event_type || null;
+    const resourceId = parsedBody.resource?.id || null;
+
+    await c.env.DB
+      .prepare(
+        `insert into webhook_events (
+          id, provider, event_type, external_id, request_id,
+          signature_present, payload, created_at
+        ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)`
+      )
+      .bind(
+        crypto.randomUUID(),
+        "paypal",
+        eventType,
+        resourceId,
+        paypalEventId,
+        0,
+        rawBody,
+        createdAt
+      )
+      .run();
+
+    const clientId = c.env.PAYPAL_CLIENT_ID || "";
+    const secret = c.env.PAYPAL_SECRET || "";
+
+    if (!clientId || !secret) {
+      return c.json({
+        ok: true,
+        stored: true,
+        processed: false,
+        reason: "PayPal credentials missing",
+      });
+    }
+
+    const subscriptionId = parsedBody.resource?.id || null;
+    let subscriptionDetail: PayPalSubscriptionDetail | null = null;
+
+    if (subscriptionId) {
+      const accessToken = await getPayPalAccessToken(clientId, secret);
+      subscriptionDetail = await fetchPayPalSubscriptionDetail(
+        accessToken,
+        subscriptionId
+      );
+    }
+
+    const planId =
+      subscriptionDetail?.plan_id ||
+      parsedBody.resource?.plan_id ||
+      null;
+
+    const planCode = mapPayPalPlanCode(planId);
+    const payerEmail = normalizeEmail(
+      subscriptionDetail?.subscriber?.email_address ||
+        parsedBody.resource?.subscriber?.email_address ||
+        ""
+    );
+
+    const externalReference =
+      subscriptionDetail?.custom_id ||
+      parsedBody.resource?.custom_id ||
+      null;
+
+    const membershipStatus = mapPayPalMembershipStatus(
+      subscriptionDetail?.status || parsedBody.resource?.status || null
+    );
+
+    let linkedUserId: string | null = null;
+
+    if (payerEmail) {
+      const matchedUser = await c.env.DB
+        .prepare(`select id from users where email = ?1 limit 1`)
+        .bind(payerEmail)
+        .first<{ id: string }>();
+
+      if (matchedUser?.id) {
+        linkedUserId = matchedUser.id;
+      }
+    }
+
+    if (!linkedUserId && externalReference) {
+      const matchedUserByReference = await c.env.DB
+        .prepare(`select id from users where id = ?1 limit 1`)
+        .bind(externalReference)
+        .first<{ id: string }>();
+
+      if (matchedUserByReference?.id) {
+        linkedUserId = matchedUserByReference.id;
+      }
+    }
+
+    if (subscriptionId) {
+      const existingMembership = await c.env.DB
+        .prepare(
+          `select id
+           from memberships
+           where provider = ?1 and provider_subscription_id = ?2
+           limit 1`
+        )
+        .bind("paypal", subscriptionId)
+        .first<{ id: string }>();
+
+      if (existingMembership?.id) {
+        await c.env.DB
+          .prepare(
+            `update memberships
+             set user_id = coalesce(?1, user_id),
+                 plan_code = ?2,
+                 status = ?3,
+                 payer_email = coalesce(?4, payer_email),
+                 external_reference = coalesce(?5, external_reference),
+                 started_at = coalesce(?6, started_at),
+                 current_period_end = ?7,
+                 last_event_at = ?8,
+                 updated_at = ?9
+             where id = ?10`
+          )
+          .bind(
+            linkedUserId,
+            planCode,
+            membershipStatus,
+            payerEmail || null,
+            externalReference,
+            subscriptionDetail?.start_time || parsedBody.resource?.start_time || null,
+            subscriptionDetail?.billing_info?.next_billing_time || null,
+            createdAt,
+            createdAt,
+            existingMembership.id
+          )
+          .run();
+      } else {
+        await c.env.DB
+          .prepare(
+            `insert into memberships (
+              id, user_id, provider, provider_subscription_id, plan_code, status,
+              payer_email, external_reference, started_at, current_period_end,
+              last_event_at, created_at, updated_at
+            ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)`
+          )
+          .bind(
+            crypto.randomUUID(),
+            linkedUserId,
+            "paypal",
+            subscriptionId,
+            planCode,
+            membershipStatus,
+            payerEmail || null,
+            externalReference,
+            subscriptionDetail?.start_time || parsedBody.resource?.start_time || null,
+            subscriptionDetail?.billing_info?.next_billing_time || null,
+            createdAt,
+            createdAt,
+            createdAt
+          )
+          .run();
+      }
+    }
+
+    return c.json({
+      ok: true,
+      stored: true,
+      processed: true,
+      provider: "paypal",
+      eventType,
+      subscriptionId,
+      linkedUserId,
+      payerEmail: payerEmail || null,
+      planId,
+      planCode,
+      membershipStatus,
+    });
+  } catch (error) {
+    return c.json(
+      {
+        ok: false,
+        error:
+          error instanceof Error ? error.message : "PayPal webhook error",
       },
       500
     );
