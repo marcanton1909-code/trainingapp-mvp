@@ -1176,9 +1176,7 @@ export default function App() {
                 </div>
               </div>
 
-              <div style={membershipNoteStyle}>
-                Sandbox activo. El acceso automático por webhook será el siguiente paso.
-              </div>
+            
             </section>
           )}
 
