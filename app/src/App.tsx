@@ -6,6 +6,8 @@ const PAYPAL_STARTER_PLAN_ID = "P-8NB63062HL487521UNHYRSJI";
 const PAYPAL_PERFORMANCE_PLAN_ID = "P-4C338724PN8826316NHYRSJQ";
 const PAYPAL_PRO_PLAN_ID = "P-2G5092788J304935ENHYRSJQ";
 
+const AUTH_TOKEN_KEY = "trainingapp_auth_token";
+
 type Session = {
   id?: string;
   day_of_week?: string;
@@ -47,7 +49,31 @@ type Membership = {
   updated_at?: string | null;
 };
 
-type TabMode = "home" | "new" | "existing" | "membership";
+type AuthUser = {
+  id: string;
+  email: string;
+  name: string;
+};
+
+type Entitlements = {
+  has_active_membership?: number;
+  can_generate_base_plan?: number;
+  can_connect_strava?: number;
+  can_use_strava_metrics?: number;
+  can_generate_advanced_plan?: number;
+  can_regenerate_with_history?: number;
+  can_use_premium_planning?: number;
+  source_plan_code?: string | null;
+  updated_at?: string;
+};
+
+type TabMode =
+  | "home"
+  | "new"
+  | "existing"
+  | "membership"
+  | "login"
+  | "register";
 
 declare global {
   interface Window {
@@ -104,8 +130,24 @@ function loadPayPalSdk(clientId: string) {
 }
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<TabMode>("home");
+  const [activeTab, setActiveTab] = useState<TabMode>("login");
   const [isMobile, setIsMobile] = useState(false);
+
+  const [authLoading, setAuthLoading] = useState(true);
+  const [authToken, setAuthToken] = useState("");
+  const [authUser, setAuthUser] = useState<AuthUser | null>(null);
+  const [entitlements, setEntitlements] = useState<Entitlements | null>(null);
+
+  const [loginForm, setLoginForm] = useState({
+    email: "",
+    password: "",
+  });
+
+  const [registerForm, setRegisterForm] = useState({
+    name: "",
+    email: "",
+    password: "",
+  });
 
   const [form, setForm] = useState({
     name: "",
@@ -121,6 +163,8 @@ export default function App() {
 
   const [loading, setLoading] = useState(false);
   const [lookupLoading, setLookupLoading] = useState(false);
+  const [loginLoading, setLoginLoading] = useState(false);
+  const [registerLoading, setRegisterLoading] = useState(false);
 
   const [result, setResult] = useState("");
   const [weeks, setWeeks] = useState<Week[]>([]);
@@ -144,6 +188,59 @@ export default function App() {
     window.addEventListener("resize", update);
     return () => window.removeEventListener("resize", update);
   }, []);
+
+  useEffect(() => {
+    const stored = localStorage.getItem(AUTH_TOKEN_KEY) || "";
+    if (stored) {
+      setAuthToken(stored);
+    } else {
+      setAuthLoading(false);
+      setActiveTab("login");
+    }
+  }, []);
+
+  useEffect(() => {
+    async function bootstrapAuth() {
+      if (!authToken) return;
+
+      try {
+        setAuthLoading(true);
+
+        const res = await fetch(`${API_URL}/api/auth/me`, {
+          headers: {
+            Authorization: `Bearer ${authToken}`,
+          },
+        });
+
+        const data = await res.json();
+
+        if (!res.ok) {
+          throw new Error(data?.error || "Sesión inválida");
+        }
+
+        setAuthUser(data.user || null);
+        setEntitlements(data.entitlements || null);
+        setCurrentUserId(data.user?.id || "");
+        setLookupEmail(data.user?.email || "");
+        setForm((prev) => ({
+          ...prev,
+          name: data.user?.name || prev.name,
+          email: data.user?.email || prev.email,
+        }));
+        setActiveTab("home");
+      } catch {
+        localStorage.removeItem(AUTH_TOKEN_KEY);
+        setAuthToken("");
+        setAuthUser(null);
+        setEntitlements(null);
+        setActiveTab("login");
+      } finally {
+        setAuthLoading(false);
+      }
+    }
+
+    bootstrapAuth();
+  }, [authToken]);
 
   const visibleWeek = useMemo(() => {
     return weeks.length > 0 ? weeks[0] : null;
@@ -206,6 +303,12 @@ export default function App() {
       })
     : "Sin fecha disponible";
 
+  const isStarter = entitlements?.source_plan_code === "starter";
+  const isPerformance = entitlements?.source_plan_code === "performance";
+  const isProCoach = entitlements?.source_plan_code === "pro_coach";
+  const canConnectStrava = Boolean(entitlements?.can_connect_strava);
+  const canUsePremiumPlanning = Boolean(entitlements?.can_use_premium_planning);
+
   const handleChange = (
     e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>
   ) => {
@@ -266,6 +369,30 @@ export default function App() {
     }
 
     return data.clientId as string;
+  };
+
+  const refreshAuthMe = async (token: string) => {
+    const res = await fetch(`${API_URL}/api/auth/me`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    });
+
+    const data = await res.json();
+
+    if (!res.ok) {
+      throw new Error(data?.error || "No fue posible consultar la sesión");
+    }
+
+    setAuthUser(data.user || null);
+    setEntitlements(data.entitlements || null);
+    setCurrentUserId(data.user?.id || "");
+    setLookupEmail(data.user?.email || "");
+    setForm((prev) => ({
+      ...prev,
+      name: data.user?.name || prev.name,
+      email: data.user?.email || prev.email,
+    }));
   };
 
   useEffect(() => {
@@ -374,8 +501,16 @@ export default function App() {
                   linkData.status === "active"
               );
 
+              if (authToken) {
+                await refreshAuthMe(authToken);
+              }
+
               if (currentUserId) {
                 await fetchPlan(currentUserId);
+              }
+
+              if (lookupEmail) {
+                await fetchMembershipStatus(lookupEmail);
               }
 
               setResult(
@@ -407,7 +542,121 @@ export default function App() {
       "Performance"
     );
     renderButton(proRef.current, PAYPAL_PRO_PLAN_ID, "Pro Coach");
-  }, [activeTab, paypalReady, currentUserId]);
+  }, [activeTab, paypalReady, currentUserId, authToken, lookupEmail]);
+
+  const handleRegister = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setRegisterLoading(true);
+    setResult("");
+
+    try {
+      const res = await fetch(`${API_URL}/api/auth/register`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(registerForm),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(data?.error || "No fue posible crear la cuenta");
+      }
+
+      const token = data.token || "";
+      if (!token) {
+        throw new Error("No se recibió token de sesión");
+      }
+
+      localStorage.setItem(AUTH_TOKEN_KEY, token);
+      setAuthToken(token);
+      setAuthUser(data.user || null);
+      setCurrentUserId(data.user?.id || "");
+      setLookupEmail(data.user?.email || "");
+      setForm((prev) => ({
+        ...prev,
+        name: data.user?.name || prev.name,
+        email: data.user?.email || prev.email,
+      }));
+      setResult("Cuenta creada correctamente. Completa tu onboarding.");
+      setActiveTab("new");
+    } catch (error) {
+      setResult(
+        error instanceof Error ? error.message : "Ocurrió un error inesperado"
+      );
+    } finally {
+      setRegisterLoading(false);
+    }
+  };
+
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoginLoading(true);
+    setResult("");
+
+    try {
+      const res = await fetch(`${API_URL}/api/auth/login`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(loginForm),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(data?.error || "No fue posible iniciar sesión");
+      }
+
+      const token = data.token || "";
+      if (!token) {
+        throw new Error("No se recibió token de sesión");
+      }
+
+      localStorage.setItem(AUTH_TOKEN_KEY, token);
+      setAuthToken(token);
+      await refreshAuthMe(token);
+      setResult("Sesión iniciada correctamente.");
+      setActiveTab("home");
+    } catch (error) {
+      setResult(
+        error instanceof Error ? error.message : "Ocurrió un error inesperado"
+      );
+    } finally {
+      setLoginLoading(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      if (authToken) {
+        await fetch(`${API_URL}/api/auth/logout`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${authToken}`,
+          },
+        });
+      }
+    } catch {
+      // ignore
+    } finally {
+      localStorage.removeItem(AUTH_TOKEN_KEY);
+      setAuthToken("");
+      setAuthUser(null);
+      setEntitlements(null);
+      setMembership(null);
+      setAccessGranted(false);
+      setWeeks([]);
+      setCurrentUserId("");
+      setLookupEmail("");
+      setLoginForm({ email: "", password: "" });
+      setRegisterForm({ name: "", email: "", password: "" });
+      setActiveTab("login");
+      setResult("Sesión cerrada.");
+    }
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -417,24 +666,11 @@ export default function App() {
     setAccessGranted(false);
 
     try {
-      const onboardingRes = await fetch(`${API_URL}/api/onboarding`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(form),
-      });
-
-      const onboardingData = await onboardingRes.json();
-
-      if (!onboardingRes.ok) {
-        throw new Error(
-          onboardingData?.error || "No fue posible guardar tu perfil"
-        );
-      }
-
-      const newUserId = onboardingData.userId;
-      setCurrentUserId(newUserId);
+      const onboardingPayload = {
+        ...form,
+        email: authUser?.email || form.email,
+        name: authUser?.name || form.name,
+      };
 
       const planRes = await fetch(`${API_URL}/api/plan/generate`, {
         method: "POST",
@@ -442,8 +678,8 @@ export default function App() {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          userId: newUserId,
-          ...form,
+          userId: currentUserId,
+          ...onboardingPayload,
         }),
       });
 
@@ -453,9 +689,14 @@ export default function App() {
         throw new Error(planData?.error || "No fue posible generar tu plan");
       }
 
-      setLookupEmail(form.email);
+      setLookupEmail(authUser?.email || form.email);
+      setForm((prev) => ({
+        ...prev,
+        email: authUser?.email || prev.email,
+        name: authUser?.name || prev.name,
+      }));
       setResult(
-        "Tu perfil fue guardado. Para desbloquear el acceso al plan, activa una membresía."
+        "Tu perfil fue guardado. Para desbloquear o mejorar el acceso al plan, activa una membresía."
       );
       setActiveTab("membership");
     } catch (error) {
@@ -475,12 +716,14 @@ export default function App() {
     setAccessGranted(false);
 
     try {
+      const emailToLookup = lookupEmail || authUser?.email || "";
+
       const userRes = await fetch(`${API_URL}/api/user/find`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ email: lookupEmail }),
+        body: JSON.stringify({ email: emailToLookup }),
       });
 
       const userData = await userRes.json();
@@ -493,7 +736,7 @@ export default function App() {
 
       setCurrentUserId(userData.user.id);
 
-      const membershipData = await fetchMembershipStatus(lookupEmail);
+      const membershipData = await fetchMembershipStatus(emailToLookup);
 
       if (!membershipData.accessGranted) {
         setResult(
@@ -505,6 +748,11 @@ export default function App() {
 
       const existingUserId = userData.user.id;
       await fetchPlan(existingUserId);
+
+      if (authToken) {
+        await refreshAuthMe(authToken);
+      }
+
       setResult(`Plan cargado correctamente para ${userData.user.email}.`);
       setActiveTab("home");
     } catch (error) {
@@ -515,6 +763,19 @@ export default function App() {
       setLookupLoading(false);
     }
   };
+
+  if (authLoading) {
+    return (
+      <div style={loadingScreenStyle}>
+        <div style={loadingCardStyle}>
+          <div style={logoBoxStyle}>trAIning</div>
+          <div style={{ marginTop: 18, color: "rgba(255,255,255,0.72)" }}>
+            Cargando sesión...
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div style={pageStyle}>
@@ -562,8 +823,8 @@ export default function App() {
                 fontSize: isMobile ? 15 : 16,
               }}
             >
-              Tu dashboard te muestra el estado actual, la sesión destacada, la
-              semana visible y tu opción de membresía.
+              Ahora con acceso por cuenta, membresías, permisos por plan y base
+              lista para métricas reales y Strava.
             </p>
           </div>
 
@@ -576,16 +837,22 @@ export default function App() {
             }}
           >
             <div style={featureCardStyle}>
-              <span style={featureLabelStyle}>Objetivos</span>
-              <strong style={featureValueStyle}>5K · 10K · 21K · 42K</strong>
+              <span style={featureLabelStyle}>Usuario</span>
+              <strong style={featureValueStyle}>
+                {authUser?.name || "Invitado"}
+              </strong>
             </div>
             <div style={featureCardStyle}>
-              <span style={featureLabelStyle}>Personalización</span>
-              <strong style={featureValueStyle}>Según tu meta</strong>
+              <span style={featureLabelStyle}>Plan actual</span>
+              <strong style={featureValueStyle}>
+                {entitlements?.source_plan_code || "Sin plan"}
+              </strong>
             </div>
             <div style={featureCardStyle}>
-              <span style={featureLabelStyle}>Vista</span>
-              <strong style={featureValueStyle}>Semana activa</strong>
+              <span style={featureLabelStyle}>Strava</span>
+              <strong style={featureValueStyle}>
+                {canConnectStrava ? "Disponible" : "Bloqueado"}
+              </strong>
             </div>
             <div style={featureCardStyle}>
               <span style={featureLabelStyle}>Acceso</span>
@@ -626,53 +893,202 @@ export default function App() {
             order: isMobile ? 1 : 2,
           }}
         >
-          <div
-            style={{
-              ...tabsWrapStyle,
-              width: isMobile ? "100%" : "fit-content",
-              display: isMobile ? "grid" : "inline-flex",
-              gridTemplateColumns: isMobile ? "1fr 1fr" : undefined,
-            }}
-          >
-            <button
-              onClick={() => setActiveTab("home")}
+          {authUser ? (
+            <div
               style={{
-                ...tabButtonStyle,
-                ...(activeTab === "home" ? activeTabButtonStyle : {}),
+                ...tabsWrapStyle,
+                width: isMobile ? "100%" : "fit-content",
+                display: isMobile ? "grid" : "inline-flex",
+                gridTemplateColumns: isMobile ? "1fr 1fr" : undefined,
               }}
             >
-              Home
-            </button>
-            <button
-              onClick={() => setActiveTab("new")}
-              style={{
-                ...tabButtonStyle,
-                ...(activeTab === "new" ? activeTabButtonStyle : {}),
-              }}
-            >
-              Nuevo plan
-            </button>
-            <button
-              onClick={() => setActiveTab("existing")}
-              style={{
-                ...tabButtonStyle,
-                ...(activeTab === "existing" ? activeTabButtonStyle : {}),
-              }}
-            >
-              Mi plan
-            </button>
-            <button
-              onClick={() => setActiveTab("membership")}
-              style={{
-                ...tabButtonStyle,
-                ...(activeTab === "membership" ? activeTabButtonStyle : {}),
-              }}
-            >
-              Membresía
-            </button>
-          </div>
+              <button
+                onClick={() => setActiveTab("home")}
+                style={{
+                  ...tabButtonStyle,
+                  ...(activeTab === "home" ? activeTabButtonStyle : {}),
+                }}
+              >
+                Home
+              </button>
+              <button
+                onClick={() => setActiveTab("new")}
+                style={{
+                  ...tabButtonStyle,
+                  ...(activeTab === "new" ? activeTabButtonStyle : {}),
+                }}
+              >
+                Onboarding
+              </button>
+              <button
+                onClick={() => setActiveTab("existing")}
+                style={{
+                  ...tabButtonStyle,
+                  ...(activeTab === "existing" ? activeTabButtonStyle : {}),
+                }}
+              >
+                Mi plan
+              </button>
+              <button
+                onClick={() => setActiveTab("membership")}
+                style={{
+                  ...tabButtonStyle,
+                  ...(activeTab === "membership" ? activeTabButtonStyle : {}),
+                }}
+              >
+                Membresía
+              </button>
+            </div>
+          ) : null}
 
-          {activeTab === "home" && (
+          {activeTab === "login" && (
+            <section style={{ ...cardStyle, padding: isMobile ? 20 : 32 }}>
+              <div style={sectionHeaderStyle}>
+                <span style={badgeStyle}>Acceso</span>
+                <h2 style={{ ...formTitleStyle, fontSize: isMobile ? 26 : 32 }}>
+                  Iniciar sesión
+                </h2>
+                <p style={formTextStyle}>
+                  Accede con tu correo y contraseña para ver tu plan, membresía
+                  y próximas funciones de métricas reales.
+                </p>
+              </div>
+
+              <form onSubmit={handleLogin} style={formStyle}>
+                <div style={fieldGroupStyle}>
+                  <label style={labelStyle}>Correo</label>
+                  <input
+                    type="email"
+                    value={loginForm.email}
+                    onChange={(e) =>
+                      setLoginForm((prev) => ({
+                        ...prev,
+                        email: e.target.value,
+                      }))
+                    }
+                    required
+                    style={inputStyle}
+                    placeholder="tucorreo@email.com"
+                  />
+                </div>
+
+                <div style={fieldGroupStyle}>
+                  <label style={labelStyle}>Contraseña</label>
+                  <input
+                    type="password"
+                    value={loginForm.password}
+                    onChange={(e) =>
+                      setLoginForm((prev) => ({
+                        ...prev,
+                        password: e.target.value,
+                      }))
+                    }
+                    required
+                    style={inputStyle}
+                    placeholder="********"
+                  />
+                </div>
+
+                <button type="submit" disabled={loginLoading} style={buttonStyle}>
+                  {loginLoading ? "Entrando..." : "Iniciar sesión"}
+                </button>
+
+                <button
+                  type="button"
+                  style={secondaryButtonStyle}
+                  onClick={() => setActiveTab("register")}
+                >
+                  Crear cuenta
+                </button>
+              </form>
+            </section>
+          )}
+
+          {activeTab === "register" && (
+            <section style={{ ...cardStyle, padding: isMobile ? 20 : 32 }}>
+              <div style={sectionHeaderStyle}>
+                <span style={badgeStyle}>Registro</span>
+                <h2 style={{ ...formTitleStyle, fontSize: isMobile ? 26 : 32 }}>
+                  Crear cuenta
+                </h2>
+                <p style={formTextStyle}>
+                  Crea tu usuario para acceder a onboarding, membresías y plan.
+                </p>
+              </div>
+
+              <form onSubmit={handleRegister} style={formStyle}>
+                <div style={fieldGroupStyle}>
+                  <label style={labelStyle}>Nombre</label>
+                  <input
+                    type="text"
+                    value={registerForm.name}
+                    onChange={(e) =>
+                      setRegisterForm((prev) => ({
+                        ...prev,
+                        name: e.target.value,
+                      }))
+                    }
+                    required
+                    style={inputStyle}
+                    placeholder="Tu nombre"
+                  />
+                </div>
+
+                <div style={fieldGroupStyle}>
+                  <label style={labelStyle}>Correo</label>
+                  <input
+                    type="email"
+                    value={registerForm.email}
+                    onChange={(e) =>
+                      setRegisterForm((prev) => ({
+                        ...prev,
+                        email: e.target.value,
+                      }))
+                    }
+                    required
+                    style={inputStyle}
+                    placeholder="tucorreo@email.com"
+                  />
+                </div>
+
+                <div style={fieldGroupStyle}>
+                  <label style={labelStyle}>Contraseña</label>
+                  <input
+                    type="password"
+                    value={registerForm.password}
+                    onChange={(e) =>
+                      setRegisterForm((prev) => ({
+                        ...prev,
+                        password: e.target.value,
+                      }))
+                    }
+                    required
+                    minLength={8}
+                    style={inputStyle}
+                    placeholder="Mínimo 8 caracteres"
+                  />
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={registerLoading}
+                  style={buttonStyle}
+                >
+                  {registerLoading ? "Creando cuenta..." : "Crear cuenta"}
+                </button>
+
+                <button
+                  type="button"
+                  style={secondaryButtonStyle}
+                  onClick={() => setActiveTab("login")}
+                >
+                  Ya tengo cuenta
+                </button>
+              </form>
+            </section>
+          )}
+
+          {authUser && activeTab === "home" && (
             <section style={{ ...cardStyle, padding: isMobile ? 20 : 28 }}>
               <div style={sectionHeaderStyle}>
                 <span style={badgeStyle}>Dashboard</span>
@@ -682,8 +1098,18 @@ export default function App() {
                 <p style={formTextStyle}>
                   {accessGranted
                     ? "Una vista rápida de tu estado actual, tu próxima sesión y tu semana visible."
-                    : "Activa tu membresía para desbloquear el plan y consultar tu semana visible."}
+                    : "Completa tu membresía para desbloquear el plan y preparar la siguiente capa con métricas reales."}
                 </p>
+              </div>
+
+              <div style={profileTopBarStyle}>
+                <div>
+                  <div style={profileNameStyle}>{authUser.name}</div>
+                  <div style={profileEmailStyle}>{authUser.email}</div>
+                </div>
+                <button style={logoutButtonStyle} onClick={handleLogout}>
+                  Cerrar sesión
+                </button>
               </div>
 
               {!accessGranted && (
@@ -691,7 +1117,7 @@ export default function App() {
                   <div style={lockedTitleStyle}>Acceso bloqueado</div>
                   <div style={lockedTextStyle}>
                     Tu membresía aún no está activa. Completa tu pago para
-                    habilitar el plan.
+                    habilitar el plan y las funciones avanzadas por nivel.
                   </div>
                   <button
                     style={heroButtonStyle}
@@ -747,12 +1173,14 @@ export default function App() {
                       </div>
 
                       <div style={membershipOverviewItemStyle}>
-                        <div style={membershipOverviewItemLabelStyle}>Correo</div>
+                        <div style={membershipOverviewItemLabelStyle}>
+                          Permisos
+                        </div>
                         <div style={membershipOverviewItemValueStyle}>
-                          {lookupEmail ||
-                            form.email ||
-                            membership?.payer_email ||
-                            "Sin correo"}
+                          {isStarter && "Base"}
+                          {isPerformance && "Base + Strava"}
+                          {isProCoach && "Base + Strava + Premium"}
+                          {!isStarter && !isPerformance && !isProCoach && "Sin plan"}
                         </div>
                       </div>
 
@@ -763,6 +1191,29 @@ export default function App() {
                         <div style={membershipOverviewItemValueStyle}>
                           {membershipRenewalLabel}
                         </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div style={entitlementsCardStyle}>
+                    <div style={entitlementsTitleStyle}>Funciones habilitadas</div>
+                    <div
+                      style={{
+                        ...entitlementsGridStyle,
+                        gridTemplateColumns: isMobile
+                          ? "1fr"
+                          : "repeat(3, minmax(0, 1fr))",
+                      }}
+                    >
+                      <div style={entitlementItemStyle}>
+                        Plan base:{" "}
+                        {entitlements?.can_generate_base_plan ? "Sí" : "No"}
+                      </div>
+                      <div style={entitlementItemStyle}>
+                        Strava: {canConnectStrava ? "Sí" : "No"}
+                      </div>
+                      <div style={entitlementItemStyle}>
+                        Premium: {canUsePremiumPlanning ? "Sí" : "No"}
                       </div>
                     </div>
                   </div>
@@ -821,6 +1272,30 @@ export default function App() {
                         <div style={miniStatHintStyle}>Carga manejable</div>
                       </div>
                     </div>
+                  </div>
+
+                  <div style={stravaPlaceholderCardStyle}>
+                    <div style={stravaPlaceholderTitleStyle}>
+                      Integración con Strava
+                    </div>
+                    <div style={stravaPlaceholderTextStyle}>
+                      {canConnectStrava
+                        ? "Tu plan permite conectar Strava. El siguiente bloque será OAuth, sincronización de actividades reales y métricas automáticas."
+                        : "Tu plan actual no incluye Strava. Mejora a Performance o Pro Coach para desbloquear métricas reales."}
+                    </div>
+                    {canConnectStrava ? (
+                      <button style={secondaryButtonStyle} type="button">
+                        Conectar Strava próximamente
+                      </button>
+                    ) : (
+                      <button
+                        style={secondaryButtonStyle}
+                        type="button"
+                        onClick={() => setActiveTab("membership")}
+                      >
+                        Mejorar plan
+                      </button>
+                    )}
                   </div>
 
                   {visibleWeek && (
@@ -907,15 +1382,16 @@ export default function App() {
             </section>
           )}
 
-          {activeTab === "new" && (
+          {authUser && activeTab === "new" && (
             <section style={{ ...cardStyle, padding: isMobile ? 20 : 32 }}>
               <div style={sectionHeaderStyle}>
                 <span style={badgeStyle}>Comienza hoy</span>
                 <h2 style={{ ...formTitleStyle, fontSize: isMobile ? 26 : 32 }}>
-                  Crear perfil y generar plan
+                  Completar onboarding
                 </h2>
                 <p style={formTextStyle}>
-                  Captura tu información base y genera tu plan inicial.
+                  Captura tu información base para preparar tu estructura de
+                  entrenamiento.
                 </p>
               </div>
 
@@ -925,10 +1401,11 @@ export default function App() {
                   <input
                     name="name"
                     placeholder="Tu nombre"
-                    value={form.name}
+                    value={authUser?.name || form.name}
                     onChange={handleChange}
                     required
                     style={inputStyle}
+                    disabled
                   />
                 </div>
 
@@ -938,10 +1415,11 @@ export default function App() {
                     name="email"
                     type="email"
                     placeholder="tucorreo@email.com"
-                    value={form.email}
+                    value={authUser?.email || form.email}
                     onChange={handleChange}
                     required
                     style={inputStyle}
+                    disabled
                   />
                 </div>
 
@@ -1053,14 +1531,14 @@ export default function App() {
 
                 <button type="submit" disabled={loading} style={buttonStyle}>
                   {loading
-                    ? "Guardando y generando plan..."
-                    : "Guardar y generar plan"}
+                    ? "Guardando onboarding..."
+                    : "Guardar onboarding y continuar"}
                 </button>
               </form>
             </section>
           )}
 
-          {activeTab === "existing" && (
+          {authUser && activeTab === "existing" && (
             <section style={{ ...cardStyle, padding: isMobile ? 20 : 32 }}>
               <div style={sectionHeaderStyle}>
                 <span style={badgeStyle}>Consultar</span>
@@ -1068,7 +1546,7 @@ export default function App() {
                   Cargar plan existente
                 </h2>
                 <p style={formTextStyle}>
-                  Usa el correo registrado para consultar tu acceso y cargar la
+                  Usa tu correo registrado para consultar acceso y cargar la
                   semana disponible.
                 </p>
               </div>
@@ -1188,7 +1666,7 @@ export default function App() {
             </section>
           )}
 
-          {activeTab === "membership" && (
+          {authUser && activeTab === "membership" && (
             <section style={{ ...cardStyle, padding: isMobile ? 20 : 28 }}>
               <div style={sectionHeaderStyle}>
                 <span style={badgeStyle}>Membresía</span>
@@ -1196,13 +1674,13 @@ export default function App() {
                   Elige tu plan
                 </h2>
                 <p style={formTextStyle}>
-                  Mantén activa tu semana visible, desbloquea continuidad y
-                  realiza tu pago mensual.
+                  Starter para base, Performance para desbloquear Strava, Pro
+                  Coach para la capa premium.
                 </p>
               </div>
 
               {paypalLoading && (
-                <div style={membershipNoteStyle}>Cargando PayPal Sandbox...</div>
+                <div style={membershipNoteStyle}>Cargando PayPal...</div>
               )}
 
               {paypalError && <div style={resultStyle}>{paypalError}</div>}
@@ -1226,9 +1704,11 @@ export default function App() {
                   </div>
 
                   <div style={pricingListStyle}>
-                    <div style={pricingItemStyle}>• Semana activa visible</div>
-                    <div style={pricingItemStyle}>• Plan para 5K y 10K</div>
-                    <div style={pricingItemStyle}>• Consulta por correo</div>
+                    <div style={pricingItemStyle}>
+                      • Plan con perfil declarado
+                    </div>
+                    <div style={pricingItemStyle}>• Ideal para empezar</div>
+                    <div style={pricingItemStyle}>• Sin Strava</div>
                   </div>
 
                   <div style={paypalShellStyle}>
@@ -1245,9 +1725,11 @@ export default function App() {
                   </div>
 
                   <div style={pricingListStyle}>
-                    <div style={pricingItemStyle}>• 10K, 21K y 42K</div>
-                    <div style={pricingItemStyle}>• Mejor estructura semanal</div>
-                    <div style={pricingItemStyle}>• Sesiones y detalle completo</div>
+                    <div style={pricingItemStyle}>• Perfil + historial real</div>
+                    <div style={pricingItemStyle}>• Conexión con Strava</div>
+                    <div style={pricingItemStyle}>
+                      • Mejor base para 10K / 21K / 42K
+                    </div>
                   </div>
 
                   <div style={paypalShellStyle}>
@@ -1264,9 +1746,11 @@ export default function App() {
                   </div>
 
                   <div style={pricingListStyle}>
-                    <div style={pricingItemStyle}>• Enfoque más avanzado</div>
-                    <div style={pricingItemStyle}>• Preparación por objetivo</div>
-                    <div style={pricingItemStyle}>• Prioridad para mejoras futuras</div>
+                    <div style={pricingItemStyle}>• Strava + capa premium</div>
+                    <div style={pricingItemStyle}>• Mejor refinamiento</div>
+                    <div style={pricingItemStyle}>
+                      • Base para planificación avanzada
+                    </div>
                   </div>
 
                   <div style={paypalShellStyle}>
@@ -1362,6 +1846,25 @@ export default function App() {
     </div>
   );
 }
+
+const loadingScreenStyle: React.CSSProperties = {
+  minHeight: "100vh",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  background:
+    "linear-gradient(180deg, #070B10 0%, #0B0F14 100%)",
+  padding: 20,
+};
+
+const loadingCardStyle: React.CSSProperties = {
+  borderRadius: 24,
+  padding: 28,
+  border: "1px solid rgba(255,255,255,0.08)",
+  background: "rgba(255,255,255,0.03)",
+  textAlign: "center",
+  color: "white",
+};
 
 const pageStyle: React.CSSProperties = {
   minHeight: "100vh",
@@ -1673,6 +2176,36 @@ const resultStyle: React.CSSProperties = {
   lineHeight: 1.5,
   wordBreak: "break-word",
   border: "1px solid rgba(255,255,255,0.06)",
+};
+
+const profileTopBarStyle: React.CSSProperties = {
+  display: "flex",
+  justifyContent: "space-between",
+  alignItems: "center",
+  gap: 12,
+  marginBottom: 18,
+  flexWrap: "wrap",
+};
+
+const profileNameStyle: React.CSSProperties = {
+  fontSize: 22,
+  fontWeight: 800,
+};
+
+const profileEmailStyle: React.CSSProperties = {
+  fontSize: 14,
+  color: "rgba(255,255,255,0.65)",
+  marginTop: 4,
+};
+
+const logoutButtonStyle: React.CSSProperties = {
+  background: "rgba(255,255,255,0.06)",
+  color: "#fff",
+  border: "1px solid rgba(255,255,255,0.10)",
+  borderRadius: 14,
+  padding: "12px 14px",
+  fontWeight: 700,
+  cursor: "pointer",
 };
 
 const heroCardStyle: React.CSSProperties = {
@@ -2074,6 +2607,54 @@ const lockedTitleStyle: React.CSSProperties = {
 const lockedTextStyle: React.CSSProperties = {
   marginTop: 10,
   color: "rgba(255,255,255,0.72)",
+  lineHeight: 1.6,
+};
+
+const entitlementsCardStyle: React.CSSProperties = {
+  borderRadius: 22,
+  padding: 18,
+  border: "1px solid rgba(255,255,255,0.08)",
+  background: "rgba(255,255,255,0.03)",
+  marginBottom: 18,
+};
+
+const entitlementsTitleStyle: React.CSSProperties = {
+  fontSize: 16,
+  fontWeight: 800,
+  marginBottom: 12,
+};
+
+const entitlementsGridStyle: React.CSSProperties = {
+  display: "grid",
+  gap: 10,
+};
+
+const entitlementItemStyle: React.CSSProperties = {
+  borderRadius: 14,
+  padding: 12,
+  background: "#0B0F14",
+  border: "1px solid rgba(255,255,255,0.06)",
+  fontSize: 14,
+  color: "rgba(255,255,255,0.84)",
+};
+
+const stravaPlaceholderCardStyle: React.CSSProperties = {
+  borderRadius: 22,
+  padding: 18,
+  border: "1px solid rgba(0,230,255,0.16)",
+  background: "rgba(0,230,255,0.06)",
+  marginTop: 18,
+};
+
+const stravaPlaceholderTitleStyle: React.CSSProperties = {
+  fontSize: 18,
+  fontWeight: 800,
+  color: "#00E6FF",
+};
+
+const stravaPlaceholderTextStyle: React.CSSProperties = {
+  marginTop: 8,
+  color: "rgba(255,255,255,0.82)",
   lineHeight: 1.6,
 };
 

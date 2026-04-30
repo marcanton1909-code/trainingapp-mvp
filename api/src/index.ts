@@ -9,6 +9,7 @@ type Bindings = {
   CONEKTA_PUBLIC_KEY: string;
   PAYPAL_CLIENT_ID: string;
   PAYPAL_SECRET: string;
+  SESSION_SECRET: string;
 };
 
 type AthleteProfileInput = {
@@ -142,6 +143,31 @@ type PayPalSubscriptionDetail = {
   };
 };
 
+type AuthRegisterInput = {
+  name?: string;
+  email?: string;
+  password?: string;
+};
+
+type AuthLoginInput = {
+  email?: string;
+  password?: string;
+};
+
+type EntitlementsRow = {
+  id?: string;
+  user_id?: string;
+  has_active_membership?: number;
+  can_generate_base_plan?: number;
+  can_connect_strava?: number;
+  can_use_strava_metrics?: number;
+  can_generate_advanced_plan?: number;
+  can_regenerate_with_history?: number;
+  can_use_premium_planning?: number;
+  source_plan_code?: string | null;
+  updated_at?: string;
+};
+
 const app = new Hono<{ Bindings: Bindings }>();
 
 const ALLOWED_ORIGINS = [
@@ -162,7 +188,7 @@ function applyCors(c: Context<{ Bindings: Bindings }>) {
   c.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   c.header(
     "Access-Control-Allow-Headers",
-    "Content-Type, x-signature, x-request-id"
+    "Content-Type, Authorization, x-signature, x-request-id"
   );
   c.header("Access-Control-Max-Age", "86400");
 }
@@ -256,7 +282,8 @@ function buildSessionsForWeek(
     day_of_week: "Lunes",
     session_type: "easy_run",
     title: "Rodaje suave",
-    objective: "Construir base aeróbica y mantener constancia sin fatiga excesiva.",
+    objective:
+      "Construir base aeróbica y mantener constancia sin fatiga excesiva.",
     distance_target: easyRun,
     duration_target: easyDuration,
     intensity_zone: "Z2",
@@ -271,7 +298,9 @@ function buildSessionsForWeek(
     day_of_week: "Miércoles",
     session_type: input.goal === "Mejorar tiempo" ? "quality" : "tempo",
     title:
-      input.goal === "Mejorar tiempo" ? "Trabajo de calidad" : "Ritmo controlado",
+      input.goal === "Mejorar tiempo"
+        ? "Trabajo de calidad"
+        : "Ritmo controlado",
     objective:
       input.goal === "Mejorar tiempo"
         ? "Desarrollar velocidad controlada y tolerancia al esfuerzo."
@@ -358,12 +387,288 @@ function timingSafeEqualHex(a: string, b: string) {
   return result === 0;
 }
 
+function timingSafeEqualBase64(a: string, b: string) {
+  if (!a || !b || a.length !== b.length) return false;
+  let result = 0;
+  for (let i = 0; i < a.length; i++) {
+    result |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return result === 0;
+}
+
 async function sha256Hex(value: string) {
   const data = new TextEncoder().encode(value);
   const digest = await crypto.subtle.digest("SHA-256", data);
   return Array.from(new Uint8Array(digest))
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("");
+}
+
+function toBase64(bytes: Uint8Array) {
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
+}
+
+function fromBase64(base64: string) {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
+async function sha256Text(value: string) {
+  const data = new TextEncoder().encode(value);
+  const digest = await crypto.subtle.digest("SHA-256", data);
+  return toBase64(new Uint8Array(digest));
+}
+
+async function pbkdf2Hash(password: string, saltBase64: string) {
+  const salt = fromBase64(saltBase64);
+  const keyMaterial = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(password),
+    { name: "PBKDF2" },
+    false,
+    ["deriveBits"]
+  );
+
+  const derivedBits = await crypto.subtle.deriveBits(
+    {
+      name: "PBKDF2",
+      salt,
+      iterations: 100000,
+      hash: "SHA-256",
+    },
+    keyMaterial,
+    256
+  );
+
+  return toBase64(new Uint8Array(derivedBits));
+}
+
+async function hashPassword(password: string) {
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const saltBase64 = toBase64(salt);
+  const hashBase64 = await pbkdf2Hash(password, saltBase64);
+  return `${saltBase64}:${hashBase64}`;
+}
+
+async function verifyPassword(password: string, stored: string) {
+  const [saltBase64, storedHash] = stored.split(":");
+  if (!saltBase64 || !storedHash) return false;
+  const computed = await pbkdf2Hash(password, saltBase64);
+  return timingSafeEqualBase64(computed, storedHash);
+}
+
+function createSessionToken() {
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  return toBase64(bytes);
+}
+
+function parseBearerToken(authHeader: string | undefined | null) {
+  if (!authHeader) return "";
+  const [type, token] = authHeader.split(" ");
+  if (type !== "Bearer" || !token) return "";
+  return token.trim();
+}
+
+function getEntitlementsFromPlan(planCode: string | null, status: string | null) {
+  const active = status === "active";
+
+  if (!active) {
+    return {
+      has_active_membership: 0,
+      can_generate_base_plan: 0,
+      can_connect_strava: 0,
+      can_use_strava_metrics: 0,
+      can_generate_advanced_plan: 0,
+      can_regenerate_with_history: 0,
+      can_use_premium_planning: 0,
+      source_plan_code: planCode,
+    };
+  }
+
+  if (planCode === "starter") {
+    return {
+      has_active_membership: 1,
+      can_generate_base_plan: 1,
+      can_connect_strava: 0,
+      can_use_strava_metrics: 0,
+      can_generate_advanced_plan: 0,
+      can_regenerate_with_history: 0,
+      can_use_premium_planning: 0,
+      source_plan_code: "starter",
+    };
+  }
+
+  if (planCode === "performance") {
+    return {
+      has_active_membership: 1,
+      can_generate_base_plan: 1,
+      can_connect_strava: 1,
+      can_use_strava_metrics: 1,
+      can_generate_advanced_plan: 1,
+      can_regenerate_with_history: 1,
+      can_use_premium_planning: 0,
+      source_plan_code: "performance",
+    };
+  }
+
+  if (planCode === "pro_coach") {
+    return {
+      has_active_membership: 1,
+      can_generate_base_plan: 1,
+      can_connect_strava: 1,
+      can_use_strava_metrics: 1,
+      can_generate_advanced_plan: 1,
+      can_regenerate_with_history: 1,
+      can_use_premium_planning: 1,
+      source_plan_code: "pro_coach",
+    };
+  }
+
+  return {
+    has_active_membership: 0,
+    can_generate_base_plan: 0,
+    can_connect_strava: 0,
+    can_use_strava_metrics: 0,
+    can_generate_advanced_plan: 0,
+    can_regenerate_with_history: 0,
+    can_use_premium_planning: 0,
+    source_plan_code: planCode,
+  };
+}
+
+async function refreshUserEntitlements(db: D1Database, userId: string) {
+  const membership = await db
+    .prepare(
+      `select plan_code, status
+       from memberships
+       where user_id = ?1
+       order by updated_at desc
+       limit 1`
+    )
+    .bind(userId)
+    .first<{ plan_code: string | null; status: string | null }>();
+
+  const values = getEntitlementsFromPlan(
+    membership?.plan_code || null,
+    membership?.status || null
+  );
+
+  const existing = await db
+    .prepare(
+      `select id
+       from user_entitlements
+       where user_id = ?1
+       limit 1`
+    )
+    .bind(userId)
+    .first<{ id: string }>();
+
+  const now = new Date().toISOString();
+
+  if (existing?.id) {
+    await db
+      .prepare(
+        `update user_entitlements
+         set has_active_membership = ?1,
+             can_generate_base_plan = ?2,
+             can_connect_strava = ?3,
+             can_use_strava_metrics = ?4,
+             can_generate_advanced_plan = ?5,
+             can_regenerate_with_history = ?6,
+             can_use_premium_planning = ?7,
+             source_plan_code = ?8,
+             updated_at = ?9
+         where id = ?10`
+      )
+      .bind(
+        values.has_active_membership,
+        values.can_generate_base_plan,
+        values.can_connect_strava,
+        values.can_use_strava_metrics,
+        values.can_generate_advanced_plan,
+        values.can_regenerate_with_history,
+        values.can_use_premium_planning,
+        values.source_plan_code,
+        now,
+        existing.id
+      )
+      .run();
+  } else {
+    await db
+      .prepare(
+        `insert into user_entitlements (
+          id, user_id, has_active_membership, can_generate_base_plan,
+          can_connect_strava, can_use_strava_metrics, can_generate_advanced_plan,
+          can_regenerate_with_history, can_use_premium_planning,
+          source_plan_code, updated_at
+        ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)`
+      )
+      .bind(
+        crypto.randomUUID(),
+        userId,
+        values.has_active_membership,
+        values.can_generate_base_plan,
+        values.can_connect_strava,
+        values.can_use_strava_metrics,
+        values.can_generate_advanced_plan,
+        values.can_regenerate_with_history,
+        values.can_use_premium_planning,
+        values.source_plan_code,
+        now
+      )
+      .run();
+  }
+
+  return values;
+}
+
+async function getAuthenticatedUser(c: Context<{ Bindings: Bindings }>) {
+  const authHeader = c.req.header("authorization");
+  const rawToken = parseBearerToken(authHeader);
+
+  if (!rawToken) return null;
+
+  const tokenHash = await sha256Text(`${rawToken}:${c.env.SESSION_SECRET}`);
+
+  const session = await c.env.DB
+    .prepare(
+      `select us.id, us.user_id, us.expires_at, us.revoked_at,
+              u.email, u.name
+       from user_sessions us
+       inner join users u on u.id = us.user_id
+       where us.token_hash = ?1
+       limit 1`
+    )
+    .bind(tokenHash)
+    .first<{
+      id: string;
+      user_id: string;
+      expires_at: string;
+      revoked_at: string | null;
+      email: string;
+      name: string;
+    }>();
+
+  if (!session) return null;
+  if (session.revoked_at) return null;
+  if (new Date(session.expires_at).getTime() < Date.now()) return null;
+
+  return {
+    sessionId: session.id,
+    user: {
+      id: session.user_id,
+      email: session.email,
+      name: session.name,
+    },
+  };
 }
 
 function extractTsAndV1(signatureHeader: string) {
@@ -615,6 +920,317 @@ app.get("/api/paypal/config", (c) => {
   });
 });
 
+app.post("/api/auth/register", async (c) => {
+  try {
+    const body = (await c.req.json()) as AuthRegisterInput;
+
+    const name = body.name?.trim() || "";
+    const email = normalizeEmail(body.email || "");
+    const password = body.password || "";
+
+    if (!name) return jsonError(c, "El nombre es obligatorio");
+    if (!email) return jsonError(c, "El correo es obligatorio");
+    if (!email.includes("@")) return jsonError(c, "El correo no es válido");
+    if (!password || password.length < 8) {
+      return jsonError(c, "La contraseña debe tener al menos 8 caracteres");
+    }
+
+    const existing = await c.env.DB
+      .prepare(`select id from users where email = ?1 limit 1`)
+      .bind(email)
+      .first<{ id: string }>();
+
+    if (existing?.id) {
+      return jsonError(c, "Ese correo ya está registrado", 409);
+    }
+
+    const now = new Date().toISOString();
+    const userId = crypto.randomUUID();
+    const passwordHash = await hashPassword(password);
+
+    await c.env.DB.batch([
+      c.env.DB
+        .prepare(
+          `insert into users (
+            id, email, name, password_hash, auth_provider, is_active, created_at, updated_at
+          ) values (?1, ?2, ?3, ?4, 'email', 1, ?5, ?6)`
+        )
+        .bind(userId, email, name, passwordHash, now, now),
+      c.env.DB
+        .prepare(
+          `insert into user_entitlements (
+            id, user_id, has_active_membership, can_generate_base_plan,
+            can_connect_strava, can_use_strava_metrics, can_generate_advanced_plan,
+            can_regenerate_with_history, can_use_premium_planning, source_plan_code, updated_at
+          ) values (?1, ?2, 0, 0, 0, 0, 0, 0, 0, null, ?3)`
+        )
+        .bind(crypto.randomUUID(), userId, now),
+    ]);
+
+    const rawToken = createSessionToken();
+    const tokenHash = await sha256Text(`${rawToken}:${c.env.SESSION_SECRET}`);
+    const expiresAt = new Date(
+      Date.now() + 1000 * 60 * 60 * 24 * 30
+    ).toISOString();
+
+    await c.env.DB
+      .prepare(
+        `insert into user_sessions (
+          id, user_id, token_hash, expires_at, created_at, revoked_at, user_agent, ip_address
+        ) values (?1, ?2, ?3, ?4, ?5, null, ?6, ?7)`
+      )
+      .bind(
+        crypto.randomUUID(),
+        userId,
+        tokenHash,
+        expiresAt,
+        now,
+        c.req.header("user-agent") || null,
+        c.req.header("cf-connecting-ip") || null
+      )
+      .run();
+
+    return c.json({
+      ok: true,
+      token: rawToken,
+      user: {
+        id: userId,
+        email,
+        name,
+      },
+    });
+  } catch (error) {
+    return c.json(
+      {
+        ok: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : "No fue posible registrar al usuario",
+      },
+      500
+    );
+  }
+});
+
+app.post("/api/auth/login", async (c) => {
+  try {
+    const body = (await c.req.json()) as AuthLoginInput;
+    const email = normalizeEmail(body.email || "");
+    const password = body.password || "";
+
+    if (!email) return jsonError(c, "El correo es obligatorio");
+    if (!password) return jsonError(c, "La contraseña es obligatoria");
+
+    const user = await c.env.DB
+      .prepare(
+        `select id, email, name, password_hash, is_active
+         from users
+         where email = ?1
+         limit 1`
+      )
+      .bind(email)
+      .first<{
+        id: string;
+        email: string;
+        name: string;
+        password_hash: string | null;
+        is_active: number;
+      }>();
+
+    if (!user?.id || !user.password_hash) {
+      return jsonError(c, "Credenciales inválidas", 401);
+    }
+
+    if (!user.is_active) {
+      return jsonError(c, "La cuenta está desactivada", 403);
+    }
+
+    const validPassword = await verifyPassword(password, user.password_hash);
+    if (!validPassword) {
+      return jsonError(c, "Credenciales inválidas", 401);
+    }
+
+    const now = new Date().toISOString();
+    const rawToken = createSessionToken();
+    const tokenHash = await sha256Text(`${rawToken}:${c.env.SESSION_SECRET}`);
+    const expiresAt = new Date(
+      Date.now() + 1000 * 60 * 60 * 24 * 30
+    ).toISOString();
+
+    await c.env.DB.batch([
+      c.env.DB
+        .prepare(
+          `insert into user_sessions (
+            id, user_id, token_hash, expires_at, created_at, revoked_at, user_agent, ip_address
+          ) values (?1, ?2, ?3, ?4, ?5, null, ?6, ?7)`
+        )
+        .bind(
+          crypto.randomUUID(),
+          user.id,
+          tokenHash,
+          expiresAt,
+          now,
+          c.req.header("user-agent") || null,
+          c.req.header("cf-connecting-ip") || null
+        ),
+      c.env.DB
+        .prepare(
+          `update users set last_login_at = ?1, updated_at = ?2 where id = ?3`
+        )
+        .bind(now, now, user.id),
+    ]);
+
+    await refreshUserEntitlements(c.env.DB, user.id);
+
+    return c.json({
+      ok: true,
+      token: rawToken,
+      user: {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+      },
+    });
+  } catch (error) {
+    return c.json(
+      {
+        ok: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : "No fue posible iniciar sesión",
+      },
+      500
+    );
+  }
+});
+
+app.get("/api/auth/me", async (c) => {
+  try {
+    const auth = await getAuthenticatedUser(c);
+
+    if (!auth) {
+      return jsonError(c, "No autenticado", 401);
+    }
+
+    const entitlements = await c.env.DB
+      .prepare(
+        `select
+          has_active_membership,
+          can_generate_base_plan,
+          can_connect_strava,
+          can_use_strava_metrics,
+          can_generate_advanced_plan,
+          can_regenerate_with_history,
+          can_use_premium_planning,
+          source_plan_code,
+          updated_at
+         from user_entitlements
+         where user_id = ?1
+         limit 1`
+      )
+      .bind(auth.user.id)
+      .first<EntitlementsRow>();
+
+    return c.json({
+      ok: true,
+      user: auth.user,
+      entitlements: entitlements || null,
+    });
+  } catch (error) {
+    return c.json(
+      {
+        ok: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : "No fue posible consultar la sesión",
+      },
+      500
+    );
+  }
+});
+
+app.post("/api/auth/logout", async (c) => {
+  try {
+    const auth = await getAuthenticatedUser(c);
+
+    if (!auth) {
+      return jsonError(c, "No autenticado", 401);
+    }
+
+    const now = new Date().toISOString();
+
+    await c.env.DB
+      .prepare(
+        `update user_sessions
+         set revoked_at = ?1
+         where id = ?2`
+      )
+      .bind(now, auth.sessionId)
+      .run();
+
+    return c.json({ ok: true, loggedOut: true });
+  } catch (error) {
+    return c.json(
+      {
+        ok: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : "No fue posible cerrar sesión",
+      },
+      500
+    );
+  }
+});
+
+app.get("/api/entitlements/me", async (c) => {
+  try {
+    const auth = await getAuthenticatedUser(c);
+
+    if (!auth) {
+      return jsonError(c, "No autenticado", 401);
+    }
+
+    const entitlements = await c.env.DB
+      .prepare(
+        `select
+          has_active_membership,
+          can_generate_base_plan,
+          can_connect_strava,
+          can_use_strava_metrics,
+          can_generate_advanced_plan,
+          can_regenerate_with_history,
+          can_use_premium_planning,
+          source_plan_code,
+          updated_at
+         from user_entitlements
+         where user_id = ?1
+         limit 1`
+      )
+      .bind(auth.user.id)
+      .first<EntitlementsRow>();
+
+    return c.json({
+      ok: true,
+      entitlements: entitlements || null,
+    });
+  } catch (error) {
+    return c.json(
+      {
+        ok: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : "No fue posible consultar permisos",
+      },
+      500
+    );
+  }
+});
+
 app.post("/api/paypal/bootstrap-plans", async (c) => {
   try {
     const clientId = c.env.PAYPAL_CLIENT_ID || "";
@@ -665,7 +1281,10 @@ app.post("/api/paypal/bootstrap-plans", async (c) => {
     return c.json(
       {
         ok: false,
-        error: error instanceof Error ? error.message : "PayPal bootstrap error",
+        error:
+          error instanceof Error
+            ? error.message
+            : "PayPal bootstrap error",
       },
       500
     );
@@ -698,10 +1317,16 @@ app.post("/api/onboarding", async (c) => {
     await c.env.DB.batch([
       c.env.DB
         .prepare(
-          `insert into users (id, email, name, created_at)
-           values (?1, ?2, ?3, ?4)`
+          `insert into users (id, email, name, created_at, updated_at)
+           values (?1, ?2, ?3, ?4, ?5)`
         )
-        .bind(userId, normalizeEmail(body.email), body.name.trim(), createdAt),
+        .bind(
+          userId,
+          normalizeEmail(body.email),
+          body.name.trim(),
+          createdAt,
+          createdAt
+        ),
 
       c.env.DB
         .prepare(
@@ -1160,6 +1785,8 @@ app.post("/api/paypal/link-subscription", async (c) => {
         .run();
     }
 
+    await refreshUserEntitlements(c.env.DB, userId);
+
     return c.json({
       ok: true,
       linked: true,
@@ -1242,10 +1869,7 @@ app.post("/api/paypal/webhook", async (c) => {
       );
     }
 
-    const planId =
-      subscriptionDetail?.plan_id ||
-      parsedBody.resource?.plan_id ||
-      null;
+    const planId = subscriptionDetail?.plan_id || parsedBody.resource?.plan_id || null;
 
     const planCode = mapPayPalPlanCode(planId);
     const payerEmail = normalizeEmail(
@@ -1255,9 +1879,7 @@ app.post("/api/paypal/webhook", async (c) => {
     );
 
     const externalReference =
-      subscriptionDetail?.custom_id ||
-      parsedBody.resource?.custom_id ||
-      null;
+      subscriptionDetail?.custom_id || parsedBody.resource?.custom_id || null;
 
     const membershipStatus = mapPayPalMembershipStatus(
       subscriptionDetail?.status || parsedBody.resource?.status || null
@@ -1354,6 +1976,10 @@ app.post("/api/paypal/webhook", async (c) => {
       }
     }
 
+    if (linkedUserId) {
+      await refreshUserEntitlements(c.env.DB, linkedUserId);
+    }
+
     return c.json({
       ok: true,
       stored: true,
@@ -1429,10 +2055,7 @@ app.post("/api/mercadopago/webhook", async (c) => {
 
     let mpSubscription: MercadoPagoPreapproval | null = null;
     if (externalId && accessToken) {
-      mpSubscription = await fetchMercadoPagoPreapproval(
-        accessToken,
-        externalId
-      );
+      mpSubscription = await fetchMercadoPagoPreapproval(accessToken, externalId);
     }
 
     const payerEmail = normalizeEmail(mpSubscription?.payer_email || "");
@@ -1441,8 +2064,7 @@ app.post("/api/mercadopago/webhook", async (c) => {
       mpSubscription?.preapproval_plan_id ||
       inferPlanCodeFromEvent(externalId, eventType);
     const membershipStatus = signatureValid
-      ? mpSubscription?.status ||
-        inferMembershipStatus(signatureValid, eventType)
+      ? mpSubscription?.status || inferMembershipStatus(signatureValid, eventType)
       : inferMembershipStatus(signatureValid, eventType);
 
     let linkedUserId: string | null = null;
@@ -1534,6 +2156,10 @@ app.post("/api/mercadopago/webhook", async (c) => {
           )
           .run();
       }
+    }
+
+    if (linkedUserId) {
+      await refreshUserEntitlements(c.env.DB, linkedUserId);
     }
 
     return c.json({
