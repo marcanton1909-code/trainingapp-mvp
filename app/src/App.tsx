@@ -374,9 +374,15 @@ export default function App() {
                   linkData.status === "active"
               );
 
+              if (currentUserId) {
+                await fetchPlan(currentUserId);
+              }
+
               setResult(
-                `Suscripción ${planLabel} creada y enlazada correctamente. ID: ${subscriptionId}.`
+                `Suscripción ${planLabel} activada correctamente. Ya puedes consultar tu plan.`
               );
+
+              setActiveTab("home");
             } catch (error) {
               console.error(error);
               setResult(
