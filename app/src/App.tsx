@@ -1,17 +1,15 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 const API_URL = "https://trainingapp-api.marco-cruz.workers.dev";
 
-const STARTER_LINK =
-  "https://www.mercadopago.com.mx/subscriptions/checkout?preapproval_plan_id=440c15210b3e4f2c9a2f77996d16d4d4";
-const PERFORMANCE_LINK =
-  "https://www.mercadopago.com.mx/subscriptions/checkout?preapproval_plan_id=7fe46a2fe0014bbcbd8068829751d70d";
-const PRO_LINK =
-  "https://www.mercadopago.com.mx/subscriptions/checkout?preapproval_plan_id=568113ea5f7747fca96e02d869a29250";
+const PAYPAL_STARTER_PLAN_ID = "P-8NB63062HL487521UNHYRSJI";
+const PAYPAL_PERFORMANCE_PLAN_ID = "P-4C338724PN8826316NHYRSJQ";
+const PAYPAL_PRO_PLAN_ID = "P-2G5092788J304935ENHYRSJQ";
 
 type Session = {
   id?: string;
   day_of_week?: string;
+  session_type?: string;
   title: string;
   objective?: string;
   distance_target?: number;
@@ -29,10 +27,78 @@ type Week = {
   week_number: number;
   focus_label?: string;
   total_target_distance?: number;
+  notes?: string | null;
   sessions: Session[];
 };
 
+type Membership = {
+  id: string;
+  user_id: string | null;
+  provider: string;
+  provider_subscription_id: string;
+  plan_code: string | null;
+  status: string;
+  payer_email?: string | null;
+  external_reference?: string | null;
+  started_at?: string | null;
+  current_period_end?: string | null;
+  last_event_at?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
 type TabMode = "home" | "new" | "existing" | "membership";
+
+declare global {
+  interface Window {
+    paypal?: {
+      Buttons: (config: {
+        style?: Record<string, unknown>;
+        createSubscription: (
+          data: unknown,
+          actions: {
+            subscription: {
+              create: (input: { plan_id: string }) => Promise<string>;
+            };
+          }
+        ) => Promise<string>;
+        onApprove?: (data: { subscriptionID?: string }) => void;
+        onError?: (error: unknown) => void;
+      }) => {
+        render: (selector: string | HTMLElement) => Promise<void>;
+      };
+    };
+  }
+}
+
+function removeExistingPayPalSdk() {
+  const existing = document.querySelector('script[data-paypal-sdk="true"]');
+  if (existing) existing.remove();
+}
+
+function loadPayPalSdk(clientId: string) {
+  return new Promise<void>((resolve, reject) => {
+    if (window.paypal) {
+      resolve();
+      return;
+    }
+
+    removeExistingPayPalSdk();
+
+    const script = document.createElement("script");
+    script.src = `https://www.paypal.com/sdk/js?client-id=${encodeURIComponent(
+      clientId
+    )}&vault=true&intent=subscription&currency=MXN`;
+    script.async = true;
+    script.dataset.paypalSdk = "true";
+
+    script.onload = () => resolve();
+    script.onerror = () =>
+      reject(new Error("No fue posible cargar el SDK de PayPal"));
+
+    document.body.appendChild(script);
+  });
+}
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<TabMode>("home");
@@ -57,6 +123,16 @@ export default function App() {
   const [weeks, setWeeks] = useState<Week[]>([]);
   const [lookupEmail, setLookupEmail] = useState("");
   const [selectedSession, setSelectedSession] = useState<Session | null>(null);
+  const [membership, setMembership] = useState<Membership | null>(null);
+  const [accessGranted, setAccessGranted] = useState(false);
+
+  const [paypalReady, setPaypalReady] = useState(false);
+  const [paypalLoading, setPaypalLoading] = useState(false);
+  const [paypalError, setPaypalError] = useState("");
+
+  const starterRef = useRef<HTMLDivElement | null>(null);
+  const performanceRef = useRef<HTMLDivElement | null>(null);
+  const proRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     const update = () => setIsMobile(window.innerWidth < 960);
@@ -127,10 +203,132 @@ export default function App() {
     setWeeks(readData.weeks || []);
   };
 
+  const fetchMembershipStatus = async (email: string) => {
+    const res = await fetch(`${API_URL}/api/membership/status`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ email }),
+    });
+
+    const data = await res.json();
+
+    if (!res.ok) {
+      throw new Error(data?.error || "No fue posible consultar la membresía");
+    }
+
+    setMembership(data.membership || null);
+    setAccessGranted(Boolean(data.accessGranted));
+    return data;
+  };
+
+  const fetchPaypalConfig = async () => {
+    const res = await fetch(`${API_URL}/api/paypal/config`);
+    const data = await res.json();
+
+    if (!res.ok || !data?.clientId) {
+      throw new Error("No fue posible obtener la configuración de PayPal");
+    }
+
+    return data.clientId as string;
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function initPaypal() {
+      if (activeTab !== "membership") return;
+      if (paypalReady) return;
+
+      try {
+        setPaypalLoading(true);
+        setPaypalError("");
+
+        const clientId = await fetchPaypalConfig();
+        if (cancelled) return;
+
+        await loadPayPalSdk(clientId);
+        if (cancelled) return;
+
+        setPaypalReady(true);
+      } catch (error) {
+        if (!cancelled) {
+          setPaypalError(
+            error instanceof Error
+              ? error.message
+              : "No fue posible inicializar PayPal"
+          );
+        }
+      } finally {
+        if (!cancelled) {
+          setPaypalLoading(false);
+        }
+      }
+    }
+
+    initPaypal();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeTab, paypalReady]);
+
+  useEffect(() => {
+    if (activeTab !== "membership" || !paypalReady || !window.paypal) return;
+
+    const renderButton = async (
+      container: HTMLDivElement | null,
+      planId: string,
+      planLabel: string
+    ) => {
+      if (!container) return;
+
+      container.innerHTML = "";
+
+      await window.paypal
+        .Buttons({
+          style: {
+            shape: "pill",
+            color: "gold",
+            layout: "vertical",
+            label: "subscribe",
+          },
+          createSubscription: (_data, actions) => {
+            return actions.subscription.create({
+              plan_id: planId,
+            });
+          },
+          onApprove: (data) => {
+            setResult(
+              `Suscripción ${planLabel} creada correctamente. ID: ${
+                data.subscriptionID || "sin id"
+              }.`
+            );
+          },
+          onError: (error) => {
+            console.error(error);
+            setResult(`Ocurrió un error al iniciar la suscripción ${planLabel}.`);
+          },
+        })
+        .render(container);
+    };
+
+    renderButton(starterRef.current, PAYPAL_STARTER_PLAN_ID, "Starter");
+    renderButton(
+      performanceRef.current,
+      PAYPAL_PERFORMANCE_PLAN_ID,
+      "Performance"
+    );
+    renderButton(proRef.current, PAYPAL_PRO_PLAN_ID, "Pro Coach");
+  }, [activeTab, paypalReady]);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
     resetPlanState();
+    setMembership(null);
+    setAccessGranted(false);
 
     try {
       const onboardingRes = await fetch(`${API_URL}/api/onboarding`, {
@@ -144,7 +342,9 @@ export default function App() {
       const onboardingData = await onboardingRes.json();
 
       if (!onboardingRes.ok) {
-        throw new Error(onboardingData?.error || "No fue posible guardar tu perfil");
+        throw new Error(
+          onboardingData?.error || "No fue posible guardar tu perfil"
+        );
       }
 
       const newUserId = onboardingData.userId;
@@ -166,10 +366,11 @@ export default function App() {
         throw new Error(planData?.error || "No fue posible generar tu plan");
       }
 
-      await fetchPlan(newUserId);
-      setResult("Tu perfil fue guardado y tu primera semana ya está lista.");
-      setActiveTab("home");
       setLookupEmail(form.email);
+      setResult(
+        "Tu perfil fue guardado. Para desbloquear el acceso al plan, activa una membresía."
+      );
+      setActiveTab("membership");
     } catch (error) {
       setResult(
         error instanceof Error ? error.message : "Ocurrió un error inesperado"
@@ -183,6 +384,8 @@ export default function App() {
     e.preventDefault();
     setLookupLoading(true);
     resetPlanState();
+    setMembership(null);
+    setAccessGranted(false);
 
     try {
       const userRes = await fetch(`${API_URL}/api/user/find`, {
@@ -196,11 +399,22 @@ export default function App() {
       const userData = await userRes.json();
 
       if (!userRes.ok) {
-        throw new Error(userData?.error || "No fue posible encontrar ese usuario");
+        throw new Error(
+          userData?.error || "No fue posible encontrar ese usuario"
+        );
+      }
+
+      const membershipData = await fetchMembershipStatus(lookupEmail);
+
+      if (!membershipData.accessGranted) {
+        setResult(
+          "Tu membresía no está activa todavía. Activa tu plan para desbloquear la semana visible."
+        );
+        setActiveTab("membership");
+        return;
       }
 
       const existingUserId = userData.user.id;
-
       await fetchPlan(existingUserId);
       setResult(`Plan cargado correctamente para ${userData.user.email}.`);
       setActiveTab("home");
@@ -211,10 +425,6 @@ export default function App() {
     } finally {
       setLookupLoading(false);
     }
-  };
-
-  const goToCheckout = (url: string) => {
-    window.location.href = url;
   };
 
   return (
@@ -271,7 +481,9 @@ export default function App() {
           <div
             style={{
               ...featureGridStyle,
-              gridTemplateColumns: isMobile ? "1fr 1fr" : "repeat(2, minmax(0, 1fr))",
+              gridTemplateColumns: isMobile
+                ? "1fr 1fr"
+                : "repeat(2, minmax(0, 1fr))",
             }}
           >
             <div style={featureCardStyle}>
@@ -287,15 +499,19 @@ export default function App() {
               <strong style={featureValueStyle}>Semana activa</strong>
             </div>
             <div style={featureCardStyle}>
-              <span style={featureLabelStyle}>Membresía</span>
-              <strong style={featureValueStyle}>Pago mensual</strong>
+              <span style={featureLabelStyle}>Acceso</span>
+              <strong style={featureValueStyle}>
+                {accessGranted ? "Activo" : "Pendiente"}
+              </strong>
             </div>
           </div>
 
           <div
             style={{
               ...statsRowStyle,
-              gridTemplateColumns: isMobile ? "1fr 1fr 1fr" : "repeat(3, minmax(0, 1fr))",
+              gridTemplateColumns: isMobile
+                ? "1fr 1fr 1fr"
+                : "repeat(3, minmax(0, 1fr))",
             }}
           >
             <div style={statCardStyle}>
@@ -375,88 +591,167 @@ export default function App() {
                   Resumen de entrenamiento
                 </h2>
                 <p style={formTextStyle}>
-                  Una vista rápida de tu estado actual, tu próxima sesión y la carga de la semana disponible.
+                  {accessGranted
+                    ? "Una vista rápida de tu estado actual, tu próxima sesión y tu semana visible."
+                    : "Activa tu membresía para desbloquear el plan y consultar tu semana visible."}
                 </p>
               </div>
 
-              <div
-                style={{
-                  display: "grid",
-                  gridTemplateColumns: isMobile ? "1fr" : "1.2fr 0.8fr",
-                  gap: 16,
-                }}
-              >
-                <div style={heroCardStyle}>
-                  <div style={heroBadgeStyle}>Sesión del día</div>
-                  <div style={heroTitleStyle}>
-                    {todaysSession ? todaysSession.title : "Aún no hay plan cargado"}
+              {!accessGranted && (
+                <div style={lockedCardStyle}>
+                  <div style={lockedTitleStyle}>Acceso bloqueado</div>
+                  <div style={lockedTextStyle}>
+                    Tu membresía aún no está activa. Completa tu pago para
+                    habilitar el plan.
                   </div>
-                  <div style={heroMetaStyle}>
-                    {todaysSession?.day_of_week || "Crea o consulta un plan para comenzar"}
-                    {todaysSession?.distance_target
-                      ? ` · ${todaysSession.distance_target} km`
-                      : ""}
-                    {todaysSession?.duration_target
-                      ? ` · ${todaysSession.duration_target} min`
-                      : ""}
+                  <button
+                    style={heroButtonStyle}
+                    onClick={() => setActiveTab("membership")}
+                  >
+                    Ver membresías
+                  </button>
+                </div>
+              )}
+
+              {accessGranted && (
+                <>
+                  <div
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns: isMobile ? "1fr" : "1.1fr 0.9fr",
+                      gap: 16,
+                    }}
+                  >
+                    <div style={heroCardStyle}>
+                      <div style={heroBadgeStyle}>Sesión del día</div>
+                      <div style={heroTitleStyle}>
+                        {todaysSession
+                          ? todaysSession.title
+                          : "Aún no hay plan cargado"}
+                      </div>
+                      <div style={heroMetaStyle}>
+                        {todaysSession?.day_of_week ||
+                          "Consulta tu plan para comenzar"}
+                        {todaysSession?.distance_target
+                          ? ` · ${todaysSession.distance_target} km`
+                          : ""}
+                        {todaysSession?.duration_target
+                          ? ` · ${todaysSession.duration_target} min`
+                          : ""}
+                      </div>
+                      <div style={heroTextStyle}>
+                        {todaysSession?.objective ||
+                          "Aquí verás la sesión destacada de la semana visible."}
+                      </div>
+                      {todaysSession && (
+                        <button
+                          style={heroButtonStyle}
+                          onClick={() => setSelectedSession(todaysSession)}
+                        >
+                          Ver sesión
+                        </button>
+                      )}
+                    </div>
+
+                    <div style={miniStatsWrapStyle}>
+                      <div style={miniStatCardStyle}>
+                        <div style={miniStatLabelStyle}>Readiness</div>
+                        <div style={miniStatValueStyle}>
+                          {visibleWeeks.length > 0 ? `${readinessScore}%` : "--"}
+                        </div>
+                        <div style={miniStatHintStyle}>Listo para rendir</div>
+                      </div>
+                      <div style={miniStatCardStyle}>
+                        <div style={miniStatLabelStyle}>Recuperación</div>
+                        <div style={miniStatValueStyle}>
+                          {visibleWeeks.length > 0 ? `${recoveryScore}%` : "--"}
+                        </div>
+                        <div style={miniStatHintStyle}>Carga manejable</div>
+                      </div>
+                    </div>
                   </div>
-                  <div style={heroTextStyle}>
-                    {todaysSession?.objective ||
-                      "Aquí verás la sesión destacada de la semana visible."}
-                  </div>
-                  {todaysSession && (
-                    <button
-                      style={heroButtonStyle}
-                      onClick={() => setSelectedSession(todaysSession)}
-                    >
-                      Ver sesión
-                    </button>
+
+                  {visibleWeek && (
+                    <div style={homeWeekListWrapStyle}>
+                      <div style={homeWeekListHeaderStyle}>
+                        <div style={homeWeekListTitleStyle}>
+                          Semana {visibleWeek.week_number}
+                        </div>
+                        <div style={homeWeekListSubtitleStyle}>
+                          {visibleWeek.focus_label || "Bloque activo"}
+                        </div>
+                      </div>
+
+                      <div
+                        style={{
+                          ...homeWeekListGridStyle,
+                          gridTemplateColumns: isMobile
+                            ? "1fr"
+                            : "repeat(2, minmax(0, 1fr))",
+                        }}
+                      >
+                        {visibleWeek.sessions.map((session, index) => (
+                          <button
+                            key={`${session.day_of_week}-${index}`}
+                            style={homeWeekItemStyle}
+                            onClick={() => setSelectedSession(session)}
+                          >
+                            <div style={homeWeekItemTopStyle}>
+                              <span style={homeWeekDayStyle}>
+                                {session.day_of_week || "Sesión"}
+                              </span>
+                              <span style={homeWeekZoneStyle}>
+                                {session.intensity_zone || "General"}
+                              </span>
+                            </div>
+                            <div style={homeWeekSessionTitleStyle}>
+                              {session.title}
+                            </div>
+                            <div style={homeWeekMetaStyle}>
+                              {session.distance_target
+                                ? `${session.distance_target} km`
+                                : ""}
+                              {session.duration_target
+                                ? ` · ${session.duration_target} min`
+                                : ""}
+                            </div>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
                   )}
-                </div>
 
-                <div style={miniStatsWrapStyle}>
-                  <div style={miniStatCardStyle}>
-                    <div style={miniStatLabelStyle}>Readiness</div>
-                    <div style={miniStatValueStyle}>
-                      {visibleWeeks.length > 0 ? `${readinessScore}%` : "--"}
+                  <div
+                    style={{
+                      marginTop: 18,
+                      display: "grid",
+                      gridTemplateColumns: isMobile
+                        ? "1fr"
+                        : "repeat(3, minmax(0, 1fr))",
+                      gap: 12,
+                    }}
+                  >
+                    <div style={summaryCardStyle}>
+                      <div style={summaryLabelStyle}>Semana activa</div>
+                      <div style={summaryValueStyle}>
+                        {visibleWeek
+                          ? `Semana ${visibleWeek.week_number}`
+                          : "--"}
+                      </div>
                     </div>
-                    <div style={miniStatHintStyle}>Listo para rendir</div>
-                  </div>
-                  <div style={miniStatCardStyle}>
-                    <div style={miniStatLabelStyle}>Recuperación</div>
-                    <div style={miniStatValueStyle}>
-                      {visibleWeeks.length > 0 ? `${recoveryScore}%` : "--"}
+                    <div style={summaryCardStyle}>
+                      <div style={summaryLabelStyle}>Sesiones visibles</div>
+                      <div style={summaryValueStyle}>{totalSessions || "--"}</div>
                     </div>
-                    <div style={miniStatHintStyle}>Carga manejable</div>
+                    <div style={summaryCardStyle}>
+                      <div style={summaryLabelStyle}>Carga total</div>
+                      <div style={summaryValueStyle}>
+                        {totalDistance ? `${totalDistance} km` : "--"}
+                      </div>
+                    </div>
                   </div>
-                </div>
-              </div>
-
-              <div
-                style={{
-                  marginTop: 18,
-                  display: "grid",
-                  gridTemplateColumns: isMobile ? "1fr" : "repeat(3, minmax(0, 1fr))",
-                  gap: 12,
-                }}
-              >
-                <div style={summaryCardStyle}>
-                  <div style={summaryLabelStyle}>Semana activa</div>
-                  <div style={summaryValueStyle}>
-                    {visibleWeek ? `Semana ${visibleWeek.week_number}` : "--"}
-                  </div>
-                </div>
-                <div style={summaryCardStyle}>
-                  <div style={summaryLabelStyle}>Sesiones visibles</div>
-                  <div style={summaryValueStyle}>{totalSessions || "--"}</div>
-                </div>
-                <div style={summaryCardStyle}>
-                  <div style={summaryLabelStyle}>Carga total</div>
-                  <div style={summaryValueStyle}>
-                    {totalDistance ? `${totalDistance} km` : "--"}
-                  </div>
-                </div>
-              </div>
+                </>
+              )}
             </section>
           )}
 
@@ -569,7 +864,9 @@ export default function App() {
                 </div>
 
                 <div style={fieldGroupStyle}>
-                  <label style={labelStyle}>Volumen actual por semana (km)</label>
+                  <label style={labelStyle}>
+                    Volumen actual por semana (km)
+                  </label>
                   <input
                     name="currentVolumeKm"
                     type="number"
@@ -619,7 +916,8 @@ export default function App() {
                   Cargar plan existente
                 </h2>
                 <p style={formTextStyle}>
-                  Usa el correo registrado para consultar la semana disponible.
+                  Usa el correo registrado para consultar tu acceso y cargar la
+                  semana disponible.
                 </p>
               </div>
 
@@ -641,11 +939,25 @@ export default function App() {
                   disabled={lookupLoading}
                   style={secondaryButtonStyle}
                 >
-                  {lookupLoading ? "Buscando plan..." : "Buscar usuario y cargar plan"}
+                  {lookupLoading
+                    ? "Verificando acceso..."
+                    : "Buscar usuario y cargar plan"}
                 </button>
               </form>
 
-              {visibleWeeks.length > 0 && (
+              {membership && (
+                <div style={membershipStatusCardStyle}>
+                  <div style={membershipStatusTitleStyle}>
+                    Estado de membresía
+                  </div>
+                  <div style={membershipStatusTextStyle}>
+                    Plan: {membership.plan_code || "Sin plan"} · Estado:{" "}
+                    {membership.status}
+                  </div>
+                </div>
+              )}
+
+              {accessGranted && visibleWeeks.length > 0 && (
                 <section style={{ ...planContainerStyle, marginTop: 24 }}>
                   <div
                     style={{
@@ -655,7 +967,9 @@ export default function App() {
                     }}
                   >
                     <h3 style={planTitleStyle}>Tu semana actual</h3>
-                    <div style={planHintStyle}>Las siguientes semanas permanecen ocultas</div>
+                    <div style={planHintStyle}>
+                      Las siguientes semanas permanecen ocultas
+                    </div>
                   </div>
 
                   {visibleWeeks.map((week) => (
@@ -668,7 +982,9 @@ export default function App() {
                         }}
                       >
                         <div>
-                          <div style={weekLabelStyle}>Semana {week.week_number}</div>
+                          <div style={weekLabelStyle}>
+                            Semana {week.week_number}
+                          </div>
                           <div style={weekFocusStyle}>
                             {week.focus_label || "Bloque de entrenamiento"}
                           </div>
@@ -728,74 +1044,87 @@ export default function App() {
                   Elige tu plan
                 </h2>
                 <p style={formTextStyle}>
-                  Mantén activa tu semana visible, desbloquea continuidad y realiza tu pago mensual.
+                  Mantén activa tu semana visible, desbloquea continuidad y
+                  realiza tu pago mensual.
                 </p>
               </div>
+
+              {paypalLoading && (
+                <div style={membershipNoteStyle}>Cargando PayPal Sandbox...</div>
+              )}
+
+              {paypalError && <div style={resultStyle}>{paypalError}</div>}
 
               <div
                 style={{
                   display: "grid",
-                  gridTemplateColumns: isMobile ? "1fr" : "repeat(3, minmax(0, 1fr))",
-                  gap: 14,
+                  gridTemplateColumns: isMobile
+                    ? "1fr"
+                    : "repeat(3, minmax(0, 1fr))",
+                  gap: 20,
+                  alignItems: "stretch",
                 }}
               >
                 <div style={pricingCardStyle}>
-                  <div style={pricingTagStyle}>Base</div>
-                  <h3 style={pricingTitleStyle}>Starter</h3>
-                  <div style={pricingPriceStyle}>$149 MXN</div>
-                  <div style={pricingPeriodStyle}>mensual</div>
-                  <div style={pricingListStyle}>
-                    <div>• Semana activa visible</div>
-                    <div>• Plan para 5K y 10K</div>
-                    <div>• Consulta por correo</div>
+                  <div style={pricingHeaderBlockStyle}>
+                    <div style={pricingTagStyle}>Base</div>
+                    <h3 style={pricingTitleStyle}>Starter</h3>
+                    <div style={pricingPriceStyle}>$149 MXN</div>
+                    <div style={pricingPeriodStyle}>mensual</div>
                   </div>
-                  <button
-                    style={pricingButtonStyle}
-                    onClick={() => goToCheckout(STARTER_LINK)}
-                  >
-                    Pagar
-                  </button>
+
+                  <div style={pricingListStyle}>
+                    <div style={pricingItemStyle}>• Semana activa visible</div>
+                    <div style={pricingItemStyle}>• Plan para 5K y 10K</div>
+                    <div style={pricingItemStyle}>• Consulta por correo</div>
+                  </div>
+
+                  <div style={paypalShellStyle}>
+                    <div ref={starterRef} style={paypalButtonWrapStyle} />
+                  </div>
                 </div>
 
                 <div style={{ ...pricingCardStyle, ...pricingFeaturedStyle }}>
-                  <div style={pricingTagStyle}>Recomendado</div>
-                  <h3 style={pricingTitleStyle}>Performance</h3>
-                  <div style={pricingPriceStyle}>$249 MXN</div>
-                  <div style={pricingPeriodStyle}>mensual</div>
-                  <div style={pricingListStyle}>
-                    <div>• 10K, 21K y 42K</div>
-                    <div>• Mejor estructura semanal</div>
-                    <div>• Sesiones y detalle completo</div>
+                  <div style={pricingHeaderBlockStyle}>
+                    <div style={pricingTagStyle}>Recomendado</div>
+                    <h3 style={pricingTitleStyle}>Performance</h3>
+                    <div style={pricingPriceStyle}>$249 MXN</div>
+                    <div style={pricingPeriodStyle}>mensual</div>
                   </div>
-                  <button
-                    style={pricingButtonStyle}
-                    onClick={() => goToCheckout(PERFORMANCE_LINK)}
-                  >
-                    Pagar
-                  </button>
+
+                  <div style={pricingListStyle}>
+                    <div style={pricingItemStyle}>• 10K, 21K y 42K</div>
+                    <div style={pricingItemStyle}>• Mejor estructura semanal</div>
+                    <div style={pricingItemStyle}>• Sesiones y detalle completo</div>
+                  </div>
+
+                  <div style={paypalShellStyle}>
+                    <div ref={performanceRef} style={paypalButtonWrapStyle} />
+                  </div>
                 </div>
 
                 <div style={pricingCardStyle}>
-                  <div style={pricingTagStyle}>Premium</div>
-                  <h3 style={pricingTitleStyle}>Pro Coach</h3>
-                  <div style={pricingPriceStyle}>$449 MXN</div>
-                  <div style={pricingPeriodStyle}>mensual</div>
-                  <div style={pricingListStyle}>
-                    <div>• Enfoque más avanzado</div>
-                    <div>• Preparación por objetivo</div>
-                    <div>• Prioridad para mejoras futuras</div>
+                  <div style={pricingHeaderBlockStyle}>
+                    <div style={pricingTagStyle}>Premium</div>
+                    <h3 style={pricingTitleStyle}>Pro Coach</h3>
+                    <div style={pricingPriceStyle}>$449 MXN</div>
+                    <div style={pricingPeriodStyle}>mensual</div>
                   </div>
-                  <button
-                    style={pricingButtonStyle}
-                    onClick={() => goToCheckout(PRO_LINK)}
-                  >
-                    Pagar
-                  </button>
+
+                  <div style={pricingListStyle}>
+                    <div style={pricingItemStyle}>• Enfoque más avanzado</div>
+                    <div style={pricingItemStyle}>• Preparación por objetivo</div>
+                    <div style={pricingItemStyle}>• Prioridad para mejoras futuras</div>
+                  </div>
+
+                  <div style={paypalShellStyle}>
+                    <div ref={proRef} style={paypalButtonWrapStyle} />
+                  </div>
                 </div>
               </div>
 
               <div style={membershipNoteStyle}>
-                Ya están conectados los botones al checkout.
+                Sandbox activo. El acceso automático por webhook será el siguiente paso.
               </div>
             </section>
           )}
@@ -874,7 +1203,9 @@ export default function App() {
             {typeof selectedSession.estimated_load === "number" && (
               <div style={detailBlockStyle}>
                 <div style={detailTitleStyle}>Carga estimada</div>
-                <div style={detailTextStyle}>{selectedSession.estimated_load}</div>
+                <div style={detailTextStyle}>
+                  {selectedSession.estimated_load}
+                </div>
               </div>
             )}
           </div>
@@ -1280,6 +1611,76 @@ const miniStatHintStyle: React.CSSProperties = {
   color: "rgba(255,255,255,0.72)",
 };
 
+const homeWeekListWrapStyle: React.CSSProperties = {
+  marginTop: 18,
+  borderRadius: 22,
+  padding: 18,
+  border: "1px solid rgba(255,255,255,0.08)",
+  background: "rgba(255,255,255,0.03)",
+};
+
+const homeWeekListHeaderStyle: React.CSSProperties = {
+  marginBottom: 14,
+};
+
+const homeWeekListTitleStyle: React.CSSProperties = {
+  fontSize: 20,
+  fontWeight: 800,
+  color: "#D6FF4D",
+};
+
+const homeWeekListSubtitleStyle: React.CSSProperties = {
+  marginTop: 4,
+  color: "rgba(255,255,255,0.66)",
+  fontSize: 13,
+};
+
+const homeWeekListGridStyle: React.CSSProperties = {
+  display: "grid",
+  gap: 10,
+};
+
+const homeWeekItemStyle: React.CSSProperties = {
+  borderRadius: 16,
+  background: "#0B0F14",
+  border: "1px solid rgba(255,255,255,0.06)",
+  padding: 14,
+  textAlign: "left",
+  cursor: "pointer",
+  color: "white",
+};
+
+const homeWeekItemTopStyle: React.CSSProperties = {
+  display: "flex",
+  justifyContent: "space-between",
+  gap: 10,
+  marginBottom: 6,
+  alignItems: "center",
+};
+
+const homeWeekDayStyle: React.CSSProperties = {
+  fontSize: 12,
+  color: "#D6FF4D",
+  fontWeight: 700,
+};
+
+const homeWeekZoneStyle: React.CSSProperties = {
+  fontSize: 12,
+  color: "#00E6FF",
+  fontWeight: 700,
+};
+
+const homeWeekSessionTitleStyle: React.CSSProperties = {
+  fontSize: 15,
+  fontWeight: 700,
+};
+
+const homeWeekMetaStyle: React.CSSProperties = {
+  marginTop: 6,
+  fontSize: 13,
+  color: "rgba(255,255,255,0.65)",
+};
+
 const summaryCardStyle: React.CSSProperties = {
   borderRadius: 18,
   padding: 16,
@@ -1408,25 +1809,38 @@ const pricingCardStyle: React.CSSProperties = {
   border: "1px solid rgba(255,255,255,0.08)",
   background: "rgba(255,255,255,0.03)",
   padding: 22,
+  display: "flex",
+  flexDirection: "column",
+  minHeight: 720,
+  overflow: "hidden",
 };
 
 const pricingFeaturedStyle: React.CSSProperties = {
-  boxShadow: "0 0 0 1px rgba(214,255,77,0.18), 0 18px 40px rgba(214,255,77,0.08)",
+  boxShadow:
+    "0 0 0 1px rgba(214,255,77,0.18), 0 18px 40px rgba(214,255,77,0.08)",
+};
+
+const pricingHeaderBlockStyle: React.CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: 8,
 };
 
 const pricingTagStyle: React.CSSProperties = {
-  display: "inline-block",
+  display: "inline-flex",
+  alignItems: "center",
   padding: "7px 10px",
   borderRadius: 999,
   background: "rgba(0,230,255,0.10)",
   color: "#00E6FF",
   fontSize: 12,
   fontWeight: 700,
+  width: "fit-content",
+  alignSelf: "flex-start",
 };
 
 const pricingTitleStyle: React.CSSProperties = {
-  marginTop: 16,
-  marginBottom: 8,
+  margin: "12px 0 0 0",
   fontSize: 24,
 };
 
@@ -1434,39 +1848,85 @@ const pricingPriceStyle: React.CSSProperties = {
   fontSize: 34,
   fontWeight: 800,
   color: "#D6FF4D",
+  lineHeight: 1.1,
 };
 
 const pricingPeriodStyle: React.CSSProperties = {
   color: "rgba(255,255,255,0.62)",
   fontSize: 14,
-  marginTop: 4,
 };
 
 const pricingListStyle: React.CSSProperties = {
   display: "grid",
-  gap: 8,
-  marginTop: 18,
+  gap: 16,
+  marginTop: 28,
+  minHeight: 170,
+  alignContent: "start",
+};
+
+const pricingItemStyle: React.CSSProperties = {
   color: "rgba(255,255,255,0.85)",
   lineHeight: 1.5,
   fontSize: 14,
 };
 
-const pricingButtonStyle: React.CSSProperties = {
-  marginTop: 22,
+const paypalShellStyle: React.CSSProperties = {
+  marginTop: "auto",
   width: "100%",
-  background: "#D6FF4D",
-  color: "#000",
-  border: "none",
-  borderRadius: 16,
-  padding: "14px 16px",
-  fontWeight: 800,
-  cursor: "pointer",
+  overflow: "hidden",
+  paddingTop: 12,
+  display: "flex",
+  justifyContent: "center",
+};
+
+const paypalButtonWrapStyle: React.CSSProperties = {
+  width: "111%",
+  transform: "scale(0.90)",
+  transformOrigin: "left bottom",
 };
 
 const membershipNoteStyle: React.CSSProperties = {
   marginTop: 18,
   color: "rgba(255,255,255,0.62)",
   fontSize: 13,
+};
+
+const membershipStatusCardStyle: React.CSSProperties = {
+  marginTop: 18,
+  borderRadius: 18,
+  padding: 16,
+  background: "rgba(255,255,255,0.04)",
+  border: "1px solid rgba(255,255,255,0.08)",
+};
+
+const membershipStatusTitleStyle: React.CSSProperties = {
+  fontSize: 14,
+  fontWeight: 800,
+  color: "#D6FF4D",
+};
+
+const membershipStatusTextStyle: React.CSSProperties = {
+  marginTop: 6,
+  color: "rgba(255,255,255,0.78)",
+  fontSize: 14,
+};
+
+const lockedCardStyle: React.CSSProperties = {
+  borderRadius: 24,
+  padding: 22,
+  border: "1px solid rgba(255,255,255,0.08)",
+  background: "rgba(255,255,255,0.03)",
+};
+
+const lockedTitleStyle: React.CSSProperties = {
+  fontSize: 26,
+  fontWeight: 800,
+};
+
+const lockedTextStyle: React.CSSProperties = {
+  marginTop: 10,
+  color: "rgba(255,255,255,0.72)",
+  lineHeight: 1.6,
 };
 
 const modalOverlayStyle: React.CSSProperties = {
