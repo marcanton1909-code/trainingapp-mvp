@@ -1048,6 +1048,141 @@ app.get("/api/plan/:userId", async (c) => {
   }
 });
 
+app.post("/api/paypal/link-subscription", async (c) => {
+  try {
+    const body = (await c.req.json()) as {
+      userId?: string;
+      subscriptionId?: string;
+    };
+
+    const userId = body.userId?.trim() || "";
+    const subscriptionId = body.subscriptionId?.trim() || "";
+
+    if (!userId) return jsonError(c, "userId es obligatorio");
+    if (!subscriptionId) return jsonError(c, "subscriptionId es obligatorio");
+
+    const user = await c.env.DB
+      .prepare(`select id from users where id = ?1 limit 1`)
+      .bind(userId)
+      .first<{ id: string }>();
+
+    if (!user?.id) {
+      return jsonError(c, "Usuario no encontrado", 404);
+    }
+
+    const clientId = c.env.PAYPAL_CLIENT_ID || "";
+    const secret = c.env.PAYPAL_SECRET || "";
+
+    if (!clientId || !secret) {
+      return jsonError(c, "Faltan credenciales de PayPal", 500);
+    }
+
+    const accessToken = await getPayPalAccessToken(clientId, secret);
+    const subscriptionDetail = await fetchPayPalSubscriptionDetail(
+      accessToken,
+      subscriptionId
+    );
+
+    if (!subscriptionDetail?.id) {
+      return jsonError(c, "No se pudo consultar la suscripción en PayPal", 404);
+    }
+
+    const createdAt = new Date().toISOString();
+    const planId = subscriptionDetail.plan_id || null;
+    const planCode = mapPayPalPlanCode(planId);
+    const membershipStatus = mapPayPalMembershipStatus(subscriptionDetail.status);
+    const payerEmail = normalizeEmail(
+      subscriptionDetail.subscriber?.email_address || ""
+    );
+
+    const existingMembership = await c.env.DB
+      .prepare(
+        `select id
+         from memberships
+         where provider = ?1 and provider_subscription_id = ?2
+         limit 1`
+      )
+      .bind("paypal", subscriptionId)
+      .first<{ id: string }>();
+
+    if (existingMembership?.id) {
+      await c.env.DB
+        .prepare(
+          `update memberships
+           set user_id = ?1,
+               plan_code = ?2,
+               status = ?3,
+               payer_email = coalesce(?4, payer_email),
+               external_reference = coalesce(?5, external_reference),
+               started_at = coalesce(?6, started_at),
+               current_period_end = ?7,
+               last_event_at = ?8,
+               updated_at = ?9
+           where id = ?10`
+        )
+        .bind(
+          userId,
+          planCode,
+          membershipStatus,
+          payerEmail || null,
+          subscriptionDetail.custom_id || null,
+          subscriptionDetail.start_time || null,
+          subscriptionDetail.billing_info?.next_billing_time || null,
+          createdAt,
+          createdAt,
+          existingMembership.id
+        )
+        .run();
+    } else {
+      await c.env.DB
+        .prepare(
+          `insert into memberships (
+            id, user_id, provider, provider_subscription_id, plan_code, status,
+            payer_email, external_reference, started_at, current_period_end,
+            last_event_at, created_at, updated_at
+          ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)`
+        )
+        .bind(
+          crypto.randomUUID(),
+          userId,
+          "paypal",
+          subscriptionId,
+          planCode,
+          membershipStatus,
+          payerEmail || null,
+          subscriptionDetail.custom_id || null,
+          subscriptionDetail.start_time || null,
+          subscriptionDetail.billing_info?.next_billing_time || null,
+          createdAt,
+          createdAt,
+          createdAt
+        )
+        .run();
+    }
+
+    return c.json({
+      ok: true,
+      linked: true,
+      userId,
+      subscriptionId,
+      planCode,
+      membershipStatus,
+      payerEmail: payerEmail || null,
+    });
+  } catch (error) {
+    return c.json(
+      {
+        ok: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : "No fue posible enlazar la suscripción",
+      },
+      500
+    );
+  }
+});
+
 app.post("/api/paypal/webhook", async (c) => {
   try {
     const rawBody = await c.req.text();
@@ -1130,18 +1265,7 @@ app.post("/api/paypal/webhook", async (c) => {
 
     let linkedUserId: string | null = null;
 
-    if (payerEmail) {
-      const matchedUser = await c.env.DB
-        .prepare(`select id from users where email = ?1 limit 1`)
-        .bind(payerEmail)
-        .first<{ id: string }>();
-
-      if (matchedUser?.id) {
-        linkedUserId = matchedUser.id;
-      }
-    }
-
-    if (!linkedUserId && externalReference) {
+    if (externalReference) {
       const matchedUserByReference = await c.env.DB
         .prepare(`select id from users where id = ?1 limit 1`)
         .bind(externalReference)
@@ -1149,6 +1273,17 @@ app.post("/api/paypal/webhook", async (c) => {
 
       if (matchedUserByReference?.id) {
         linkedUserId = matchedUserByReference.id;
+      }
+    }
+
+    if (!linkedUserId && payerEmail) {
+      const matchedUser = await c.env.DB
+        .prepare(`select id from users where email = ?1 limit 1`)
+        .bind(payerEmail)
+        .first<{ id: string }>();
+
+      if (matchedUser?.id) {
+        linkedUserId = matchedUser.id;
       }
     }
 
@@ -1231,6 +1366,7 @@ app.post("/api/paypal/webhook", async (c) => {
       planId,
       planCode,
       membershipStatus,
+      externalReference,
     });
   } catch (error) {
     return c.json(
