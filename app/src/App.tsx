@@ -286,7 +286,7 @@ export default function App() {
 
       container.innerHTML = "";
 
-      await window.paypal
+      await window.paypal!
         .Buttons({
           style: {
             shape: "pill",
@@ -1873,16 +1873,16 @@ const pricingItemStyle: React.CSSProperties = {
 const paypalShellStyle: React.CSSProperties = {
   marginTop: "auto",
   width: "100%",
+  maxWidth: "100%",
   overflow: "hidden",
   paddingTop: 12,
-  display: "flex",
-  justifyContent: "center",
 };
 
 const paypalButtonWrapStyle: React.CSSProperties = {
-  width: "111%",
-  transform: "scale(0.90)",
-  transformOrigin: "left bottom",
+  width: "100%",
+  maxWidth: "100%",
+  transform: "scale(0.94)",
+  transformOrigin: "center bottom",
 };
 
 const membershipNoteStyle: React.CSSProperties = {
