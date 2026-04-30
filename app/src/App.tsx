@@ -65,7 +65,7 @@ declare global {
             };
           }
         ) => Promise<string>;
-        onApprove?: (data: { subscriptionID?: string }) => void;
+        onApprove?: (data: { subscriptionID?: string }) => void | Promise<void>;
         onError?: (error: unknown) => void;
       }) => {
         render: (selector: string | HTMLElement) => Promise<void>;
@@ -304,12 +304,57 @@ export default function App() {
               custom_id: currentUserId || undefined,
             });
           },
-          onApprove: (data) => {
-            setResult(
-              `Suscripción ${planLabel} creada correctamente. ID: ${
-                data.subscriptionID || "sin id"
-              }.`
-            );
+          onApprove: async (data) => {
+            try {
+              const subscriptionId = data.subscriptionID || "";
+
+              if (!subscriptionId) {
+                throw new Error("PayPal no devolvió subscriptionID");
+              }
+
+              if (!currentUserId) {
+                throw new Error("No se encontró el userId actual");
+              }
+
+              const linkRes = await fetch(
+                `${API_URL}/api/paypal/link-subscription`,
+                {
+                  method: "POST",
+                  headers: {
+                    "Content-Type": "application/json",
+                  },
+                  body: JSON.stringify({
+                    userId: currentUserId,
+                    subscriptionId,
+                  }),
+                }
+              );
+
+              const linkData = await linkRes.json();
+
+              if (!linkRes.ok) {
+                throw new Error(
+                  linkData?.error || "No fue posible enlazar la suscripción"
+                );
+              }
+
+              setMembership(linkData.membership || null);
+              setAccessGranted(
+                linkData.membershipStatus === "active" ||
+                  linkData.status === "active"
+              );
+
+              setResult(
+                `Suscripción ${planLabel} creada y enlazada correctamente. ID: ${subscriptionId}.`
+              );
+            } catch (error) {
+              console.error(error);
+              setResult(
+                error instanceof Error
+                  ? error.message
+                  : "Ocurrió un error al enlazar la suscripción"
+              );
+            }
           },
           onError: (error) => {
             console.error(error);
