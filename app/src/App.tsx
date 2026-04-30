@@ -176,6 +176,36 @@ export default function App() {
   const readinessScore = visibleWeeks.length > 0 ? 82 : 0;
   const recoveryScore = visibleWeeks.length > 0 ? 76 : 0;
 
+  const membershipLabel =
+    membership?.plan_code === "starter"
+      ? "Starter"
+      : membership?.plan_code === "performance"
+      ? "Performance"
+      : membership?.plan_code === "pro_coach"
+      ? "Pro Coach"
+      : membership?.plan_code || "Sin plan";
+
+  const membershipStatusLabel =
+    membership?.status === "active"
+      ? "Activa"
+      : membership?.status === "pending_activation"
+      ? "Pendiente"
+      : membership?.status === "cancelled"
+      ? "Cancelada"
+      : membership?.status === "suspended"
+      ? "Suspendida"
+      : membership?.status === "expired"
+      ? "Expirada"
+      : membership?.status || "Sin estado";
+
+  const membershipRenewalLabel = membership?.current_period_end
+    ? new Date(membership.current_period_end).toLocaleDateString("es-MX", {
+        year: "numeric",
+        month: "long",
+        day: "numeric",
+      })
+    : "Sin fecha disponible";
+
   const handleChange = (
     e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>
   ) => {
@@ -668,6 +698,69 @@ export default function App() {
 
               {accessGranted && (
                 <>
+                  <div
+                    style={{
+                      ...membershipOverviewCardStyle,
+                      marginBottom: 18,
+                    }}
+                  >
+                    <div style={membershipOverviewHeaderStyle}>
+                      <div>
+                        <div style={membershipOverviewEyebrowStyle}>
+                          Mi membresía
+                        </div>
+                        <div style={membershipOverviewTitleStyle}>
+                          {membershipLabel}
+                        </div>
+                      </div>
+                      <div style={membershipOverviewStatusBadgeStyle}>
+                        {membershipStatusLabel}
+                      </div>
+                    </div>
+
+                    <div
+                      style={{
+                        ...membershipOverviewGridStyle,
+                        gridTemplateColumns: isMobile
+                          ? "1fr"
+                          : "repeat(4, minmax(0, 1fr))",
+                      }}
+                    >
+                      <div style={membershipOverviewItemStyle}>
+                        <div style={membershipOverviewItemLabelStyle}>Plan</div>
+                        <div style={membershipOverviewItemValueStyle}>
+                          {membershipLabel}
+                        </div>
+                      </div>
+
+                      <div style={membershipOverviewItemStyle}>
+                        <div style={membershipOverviewItemLabelStyle}>Estado</div>
+                        <div style={membershipOverviewItemValueStyle}>
+                          {membershipStatusLabel}
+                        </div>
+                      </div>
+
+                      <div style={membershipOverviewItemStyle}>
+                        <div style={membershipOverviewItemLabelStyle}>Correo</div>
+                        <div style={membershipOverviewItemValueStyle}>
+                          {lookupEmail ||
+                            form.email ||
+                            membership?.payer_email ||
+                            "Sin correo"}
+                        </div>
+                      </div>
+
+                      <div style={membershipOverviewItemStyle}>
+                        <div style={membershipOverviewItemLabelStyle}>
+                          Próxima renovación
+                        </div>
+                        <div style={membershipOverviewItemValueStyle}>
+                          {membershipRenewalLabel}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
                   <div
                     style={{
                       display: "grid",
@@ -1175,8 +1268,6 @@ export default function App() {
                   </div>
                 </div>
               </div>
-
-            
             </section>
           )}
 
@@ -2054,4 +2145,71 @@ const detailTextStyle: React.CSSProperties = {
   color: "rgba(255,255,255,0.84)",
   lineHeight: 1.6,
   fontSize: 14,
+};
+
+const membershipOverviewCardStyle: React.CSSProperties = {
+  borderRadius: 24,
+  padding: 20,
+  border: "1px solid rgba(255,255,255,0.08)",
+  background: "rgba(255,255,255,0.03)",
+};
+
+const membershipOverviewHeaderStyle: React.CSSProperties = {
+  display: "flex",
+  justifyContent: "space-between",
+  alignItems: "center",
+  gap: 14,
+  marginBottom: 16,
+  flexWrap: "wrap",
+};
+
+const membershipOverviewEyebrowStyle: React.CSSProperties = {
+  fontSize: 12,
+  color: "#00E6FF",
+  fontWeight: 700,
+  marginBottom: 6,
+};
+
+const membershipOverviewTitleStyle: React.CSSProperties = {
+  fontSize: 24,
+  fontWeight: 800,
+  color: "#fff",
+};
+
+const membershipOverviewStatusBadgeStyle: React.CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  padding: "8px 12px",
+  borderRadius: 999,
+  background: "rgba(214,255,77,0.12)",
+  color: "#D6FF4D",
+  fontSize: 12,
+  fontWeight: 800,
+};
+
+const membershipOverviewGridStyle: React.CSSProperties = {
+  display: "grid",
+  gap: 12,
+};
+
+const membershipOverviewItemStyle: React.CSSProperties = {
+  borderRadius: 18,
+  padding: 14,
+  background: "#0B0F14",
+  border: "1px solid rgba(255,255,255,0.06)",
+};
+
+const membershipOverviewItemLabelStyle: React.CSSProperties = {
+  fontSize: 12,
+  color: "rgba(255,255,255,0.55)",
+  marginBottom: 6,
+};
+
+const membershipOverviewItemValueStyle: React.CSSProperties = {
+  fontSize: 15,
+  color: "#fff",
+  fontWeight: 700,
+  lineHeight: 1.4,
+  wordBreak: "break-word",
 };
