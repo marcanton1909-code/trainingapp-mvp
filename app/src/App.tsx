@@ -58,7 +58,10 @@ declare global {
           data: unknown,
           actions: {
             subscription: {
-              create: (input: { plan_id: string }) => Promise<string>;
+              create: (input: {
+                plan_id: string;
+                custom_id?: string;
+              }) => Promise<string>;
             };
           }
         ) => Promise<string>;
@@ -125,6 +128,7 @@ export default function App() {
   const [selectedSession, setSelectedSession] = useState<Session | null>(null);
   const [membership, setMembership] = useState<Membership | null>(null);
   const [accessGranted, setAccessGranted] = useState(false);
+  const [currentUserId, setCurrentUserId] = useState("");
 
   const [paypalReady, setPaypalReady] = useState(false);
   const [paypalLoading, setPaypalLoading] = useState(false);
@@ -297,6 +301,7 @@ export default function App() {
           createSubscription: (_data, actions) => {
             return actions.subscription.create({
               plan_id: planId,
+              custom_id: currentUserId || undefined,
             });
           },
           onApprove: (data) => {
@@ -321,7 +326,7 @@ export default function App() {
       "Performance"
     );
     renderButton(proRef.current, PAYPAL_PRO_PLAN_ID, "Pro Coach");
-  }, [activeTab, paypalReady]);
+  }, [activeTab, paypalReady, currentUserId]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -348,6 +353,7 @@ export default function App() {
       }
 
       const newUserId = onboardingData.userId;
+      setCurrentUserId(newUserId);
 
       const planRes = await fetch(`${API_URL}/api/plan/generate`, {
         method: "POST",
@@ -403,6 +409,8 @@ export default function App() {
           userData?.error || "No fue posible encontrar ese usuario"
         );
       }
+
+      setCurrentUserId(userData.user.id);
 
       const membershipData = await fetchMembershipStatus(lookupEmail);
 
