@@ -671,6 +671,204 @@ async function getAuthenticatedUser(c: Context<{ Bindings: Bindings }>) {
   };
 }
 
+async function createTrainingPlanForUser(
+  db: D1Database,
+  userId: string,
+  input: AthleteProfileInput
+) {
+  const planId = crypto.randomUUID();
+  const createdAt = new Date().toISOString();
+  const weeks = buildPlanStructure(input);
+  const eventDate = input.eventDate?.trim() || null;
+  const startDate = createdAt.slice(0, 10);
+
+  const batchStatements = [
+    db
+      .prepare(
+        `insert into training_plans (
+          id, user_id, version, status, start_date, end_date, plan_summary, generation_source, created_at
+        ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)`
+      )
+      .bind(
+        planId,
+        userId,
+        1,
+        "active",
+        startDate,
+        eventDate,
+        `Plan ${input.distance.trim()} - ${input.goal.trim()}`,
+        "trainingapp-api",
+        createdAt
+      ),
+  ];
+
+  for (const week of weeks) {
+    const weekId = crypto.randomUUID();
+
+    batchStatements.push(
+      db
+        .prepare(
+          `insert into training_weeks (
+            id, training_plan_id, week_number, focus_label, total_target_distance, notes
+          ) values (?1, ?2, ?3, ?4, ?5, ?6)`
+        )
+        .bind(
+          weekId,
+          planId,
+          week.week_number,
+          week.focus_label,
+          week.total_target_distance,
+          week.notes
+        )
+    );
+
+    for (const session of week.sessions) {
+      const sessionId = crypto.randomUUID();
+
+      batchStatements.push(
+        db
+          .prepare(
+            `insert into training_sessions (
+              id, training_week_id, day_of_week, session_type, title, objective,
+              distance_target, duration_target, intensity_zone,
+              warmup_text, main_set_text, cooldown_text,
+              estimated_load, status
+            ) values (
+              ?1, ?2, ?3, ?4, ?5, ?6,
+              ?7, ?8, ?9,
+              ?10, ?11, ?12,
+              ?13, ?14
+            )`
+          )
+          .bind(
+            sessionId,
+            weekId,
+            week.sessions.find((s) => s === session)?.day_of_week,
+            session.session_type,
+            session.title,
+            session.objective,
+            session.distance_target,
+            session.duration_target,
+            session.intensity_zone,
+            session.warmup_text,
+            session.main_set_text,
+            session.cooldown_text,
+            session.estimated_load,
+            session.status
+          )
+      );
+    }
+  }
+
+  await db.batch(batchStatements);
+
+  return {
+    planId,
+    weeksCreated: weeks.length,
+  };
+}
+
+async function ensurePlanForUser(db: D1Database, userId: string) {
+  const existingPlan = await db
+    .prepare(
+      `select id
+       from training_plans
+       where user_id = ?1
+       order by created_at desc
+       limit 1`
+    )
+    .bind(userId)
+    .first<{ id: string }>();
+
+  if (existingPlan?.id) {
+    return {
+      created: false,
+      planId: existingPlan.id,
+      reason: "already_exists",
+    };
+  }
+
+  const user = await db
+    .prepare(
+      `select id, name, email
+       from users
+       where id = ?1
+       limit 1`
+    )
+    .bind(userId)
+    .first<{ id: string; name: string; email: string }>();
+
+  const profile = await db
+    .prepare(
+      `select
+         experience_level,
+         weekly_days_available,
+         current_weekly_volume,
+         preferred_goal_type,
+         notes
+       from athlete_profiles
+       where user_id = ?1
+       limit 1`
+    )
+    .bind(userId)
+    .first<{
+      experience_level: string;
+      weekly_days_available: number;
+      current_weekly_volume: number;
+      preferred_goal_type: string;
+      notes: string | null;
+    }>();
+
+  const goal = await db
+    .prepare(
+      `select
+         goal_type,
+         target_distance,
+         target_event_name,
+         target_event_date
+       from goals
+       where user_id = ?1
+       order by created_at desc
+       limit 1`
+    )
+    .bind(userId)
+    .first<{
+      goal_type: string;
+      target_distance: string;
+      target_event_name: string | null;
+      target_event_date: string | null;
+    }>();
+
+  if (!user || !profile || !goal) {
+    return {
+      created: false,
+      planId: null,
+      reason: "missing_onboarding",
+    };
+  }
+
+  const input: AthleteProfileInput = {
+    name: user.name,
+    email: user.email,
+    goal: goal.goal_type || profile.preferred_goal_type,
+    distance: goal.target_distance,
+    daysPerWeek: Number(profile.weekly_days_available || 4),
+    level: profile.experience_level,
+    currentVolumeKm: Number(profile.current_weekly_volume || 0),
+    eventName: goal.target_event_name || "",
+    eventDate: goal.target_event_date || "",
+    notes: profile.notes || "",
+  };
+
+  const createdPlan = await createTrainingPlanForUser(db, userId, input);
+
+  return {
+    created: true,
+    planId: createdPlan.planId,
+    reason: "generated_from_profile",
+  };
+}
+
 function extractTsAndV1(signatureHeader: string) {
   const parts = signatureHeader.split(",");
   let ts = "";
@@ -1293,40 +1491,95 @@ app.post("/api/paypal/bootstrap-plans", async (c) => {
 
 app.post("/api/onboarding", async (c) => {
   try {
-    const body = (await c.req.json()) as AthleteProfileInput;
+    const body = (await c.req.json()) as AthleteProfileInput & { userId?: string };
 
     validateProfile(body);
 
-    const existingUser = await c.env.DB
-      .prepare(`select id from users where email = ?1 limit 1`)
-      .bind(normalizeEmail(body.email))
-      .first();
-
-    if (existingUser) {
-      return c.json(
-        { ok: false, error: "Ese correo ya fue registrado anteriormente" },
-        409
-      );
+    if (!body.userId?.trim()) {
+      return jsonError(c, "El userId es obligatorio");
     }
 
-    const userId = crypto.randomUUID();
+    const existingUser = await c.env.DB
+      .prepare(`select id from users where id = ?1 limit 1`)
+      .bind(body.userId)
+      .first<{ id: string }>();
+
+    if (!existingUser?.id) {
+      return jsonError(c, "Usuario no encontrado", 404);
+    }
+
+    const existingProfile = await c.env.DB
+      .prepare(`select id from athlete_profiles where user_id = ?1 limit 1`)
+      .bind(body.userId)
+      .first<{ id: string }>();
+
+    const createdAt = new Date().toISOString();
+
+    if (existingProfile?.id) {
+      await c.env.DB.batch([
+        c.env.DB
+          .prepare(
+            `update users
+             set name = ?1, updated_at = ?2
+             where id = ?3`
+          )
+          .bind(body.name.trim(), createdAt, body.userId),
+        c.env.DB
+          .prepare(
+            `update athlete_profiles
+             set experience_level = ?1,
+                 weekly_days_available = ?2,
+                 current_weekly_volume = ?3,
+                 preferred_goal_type = ?4,
+                 notes = ?5
+             where user_id = ?6`
+          )
+          .bind(
+            body.level.trim(),
+            body.daysPerWeek,
+            body.currentVolumeKm,
+            body.goal.trim(),
+            body.notes?.trim() || "",
+            body.userId
+          ),
+        c.env.DB
+          .prepare(
+            `update goals
+             set goal_type = ?1,
+                 target_distance = ?2,
+                 target_event_name = ?3,
+                 target_event_date = ?4,
+                 status = 'active'
+             where user_id = ?5`
+          )
+          .bind(
+            body.goal.trim(),
+            body.distance.trim(),
+            body.eventName?.trim() || null,
+            body.eventDate?.trim() || null,
+            body.userId
+          ),
+      ]);
+
+      return c.json({
+        ok: true,
+        userId: body.userId,
+        updated: true,
+        message: "Onboarding actualizado",
+      });
+    }
+
     const profileId = crypto.randomUUID();
     const goalId = crypto.randomUUID();
-    const createdAt = new Date().toISOString();
 
     await c.env.DB.batch([
       c.env.DB
         .prepare(
-          `insert into users (id, email, name, created_at, updated_at)
-           values (?1, ?2, ?3, ?4, ?5)`
+          `update users
+           set name = ?1, updated_at = ?2
+           where id = ?3`
         )
-        .bind(
-          userId,
-          normalizeEmail(body.email),
-          body.name.trim(),
-          createdAt,
-          createdAt
-        ),
+        .bind(body.name.trim(), createdAt, body.userId),
 
       c.env.DB
         .prepare(
@@ -1337,7 +1590,7 @@ app.post("/api/onboarding", async (c) => {
         )
         .bind(
           profileId,
-          userId,
+          body.userId,
           body.level.trim(),
           body.daysPerWeek,
           body.currentVolumeKm,
@@ -1355,7 +1608,7 @@ app.post("/api/onboarding", async (c) => {
         )
         .bind(
           goalId,
-          userId,
+          body.userId,
           body.goal.trim(),
           body.distance.trim(),
           body.eventName?.trim() || null,
@@ -1366,10 +1619,10 @@ app.post("/api/onboarding", async (c) => {
 
     return c.json({
       ok: true,
-      userId,
+      userId: body.userId,
       profileId,
       goalId,
-      message: "Onboarding saved",
+      message: "Onboarding guardado",
     });
   } catch (error) {
     return c.json(
@@ -1494,96 +1747,12 @@ app.post("/api/plan/generate", async (c) => {
       return jsonError(c, "Usuario no encontrado", 404);
     }
 
-    const planId = crypto.randomUUID();
-    const createdAt = new Date().toISOString();
-    const weeks = buildPlanStructure(body);
-    const eventDate = body.eventDate?.trim() || null;
-    const startDate = createdAt.slice(0, 10);
-
-    const batchStatements = [
-      c.env.DB
-        .prepare(
-          `insert into training_plans (
-            id, user_id, version, status, start_date, end_date, plan_summary, generation_source, created_at
-          ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)`
-        )
-        .bind(
-          planId,
-          body.userId,
-          1,
-          "active",
-          startDate,
-          eventDate,
-          `Plan ${body.distance.trim()} - ${body.goal.trim()}`,
-          "trainingapp-api",
-          createdAt
-        ),
-    ];
-
-    for (const week of weeks) {
-      const weekId = crypto.randomUUID();
-
-      batchStatements.push(
-        c.env.DB
-          .prepare(
-            `insert into training_weeks (
-              id, training_plan_id, week_number, focus_label, total_target_distance, notes
-            ) values (?1, ?2, ?3, ?4, ?5, ?6)`
-          )
-          .bind(
-            weekId,
-            planId,
-            week.week_number,
-            week.focus_label,
-            week.total_target_distance,
-            week.notes
-          )
-      );
-
-      for (const session of week.sessions) {
-        const sessionId = crypto.randomUUID();
-
-        batchStatements.push(
-          c.env.DB
-            .prepare(
-              `insert into training_sessions (
-                id, training_week_id, day_of_week, session_type, title, objective,
-                distance_target, duration_target, intensity_zone,
-                warmup_text, main_set_text, cooldown_text,
-                estimated_load, status
-              ) values (
-                ?1, ?2, ?3, ?4, ?5, ?6,
-                ?7, ?8, ?9,
-                ?10, ?11, ?12,
-                ?13, ?14
-              )`
-            )
-            .bind(
-              sessionId,
-              weekId,
-              session.day_of_week,
-              session.session_type,
-              session.title,
-              session.objective,
-              session.distance_target,
-              session.duration_target,
-              session.intensity_zone,
-              session.warmup_text,
-              session.main_set_text,
-              session.cooldown_text,
-              session.estimated_load,
-              session.status
-            )
-        );
-      }
-    }
-
-    await c.env.DB.batch(batchStatements);
+    const createdPlan = await createTrainingPlanForUser(c.env.DB, body.userId, body);
 
     return c.json({
       ok: true,
-      planId,
-      weeksCreated: weeks.length,
+      planId: createdPlan.planId,
+      weeksCreated: createdPlan.weeksCreated,
       message: "Plan generado correctamente",
     });
   } catch (error) {
@@ -1787,6 +1956,11 @@ app.post("/api/paypal/link-subscription", async (c) => {
 
     await refreshUserEntitlements(c.env.DB, userId);
 
+    let autoPlan: { created: boolean; planId: string | null; reason: string } | null = null;
+    if (membershipStatus === "active") {
+      autoPlan = await ensurePlanForUser(c.env.DB, userId);
+    }
+
     return c.json({
       ok: true,
       linked: true,
@@ -1795,6 +1969,7 @@ app.post("/api/paypal/link-subscription", async (c) => {
       planCode,
       membershipStatus,
       payerEmail: payerEmail || null,
+      autoPlan,
     });
   } catch (error) {
     return c.json(
@@ -1941,7 +2116,9 @@ app.post("/api/paypal/webhook", async (c) => {
             membershipStatus,
             payerEmail || null,
             externalReference,
-            subscriptionDetail?.start_time || parsedBody.resource?.start_time || null,
+            subscriptionDetail?.start_time ||
+              parsedBody.resource?.start_time ||
+              null,
             subscriptionDetail?.billing_info?.next_billing_time || null,
             createdAt,
             createdAt,
@@ -1966,7 +2143,9 @@ app.post("/api/paypal/webhook", async (c) => {
             membershipStatus,
             payerEmail || null,
             externalReference,
-            subscriptionDetail?.start_time || parsedBody.resource?.start_time || null,
+            subscriptionDetail?.start_time ||
+              parsedBody.resource?.start_time ||
+              null,
             subscriptionDetail?.billing_info?.next_billing_time || null,
             createdAt,
             createdAt,
@@ -1976,8 +2155,13 @@ app.post("/api/paypal/webhook", async (c) => {
       }
     }
 
+    let autoPlan: { created: boolean; planId: string | null; reason: string } | null = null;
+
     if (linkedUserId) {
       await refreshUserEntitlements(c.env.DB, linkedUserId);
+      if (membershipStatus === "active") {
+        autoPlan = await ensurePlanForUser(c.env.DB, linkedUserId);
+      }
     }
 
     return c.json({
@@ -1993,6 +2177,7 @@ app.post("/api/paypal/webhook", async (c) => {
       planCode,
       membershipStatus,
       externalReference,
+      autoPlan,
     });
   } catch (error) {
     return c.json(
@@ -2158,8 +2343,13 @@ app.post("/api/mercadopago/webhook", async (c) => {
       }
     }
 
+    let autoPlan: { created: boolean; planId: string | null; reason: string } | null = null;
+
     if (linkedUserId) {
       await refreshUserEntitlements(c.env.DB, linkedUserId);
+      if (membershipStatus === "active") {
+        autoPlan = await ensurePlanForUser(c.env.DB, linkedUserId);
+      }
     }
 
     return c.json({
@@ -2183,6 +2373,7 @@ app.post("/api/mercadopago/webhook", async (c) => {
       externalReference,
       mercadoPagoStatus: mpSubscription?.status || null,
       mercadoPagoPlanId: mpSubscription?.preapproval_plan_id || null,
+      autoPlan,
     });
   } catch (error) {
     return c.json(
