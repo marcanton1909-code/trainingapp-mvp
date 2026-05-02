@@ -14,8 +14,8 @@ type Session = {
   session_type?: string;
   title: string;
   objective?: string;
-  distance_target?: number;
-  duration_target?: number;
+  distance_target?: number | null;
+  duration_target?: number | null;
   intensity_zone?: string;
   warmup_text?: string;
   main_set_text?: string;
@@ -34,18 +34,16 @@ type Week = {
 };
 
 type Membership = {
-  id: string;
-  user_id: string | null;
-  provider: string;
-  provider_subscription_id: string;
-  plan_code: string | null;
-  status: string;
+  id?: string;
+  user_id?: string | null;
+  provider?: string;
+  provider_subscription_id?: string;
+  plan_code?: string | null;
+  status?: string;
   payer_email?: string | null;
   external_reference?: string | null;
   started_at?: string | null;
   current_period_end?: string | null;
-  last_event_at?: string | null;
-  created_at?: string | null;
   updated_at?: string | null;
 };
 
@@ -67,11 +65,41 @@ type Entitlements = {
   updated_at?: string;
 };
 
+type StravaStatus = {
+  connected: boolean;
+  status?: string;
+  scope?: string | null;
+  athleteId?: string | null;
+};
+
+type MetricsWindow = {
+  windowDays: number;
+  totalDistanceKm: number;
+  totalMovingTimeSeconds: number;
+  activityCount: number;
+  avgDistanceKm: number;
+  longRunKm: number;
+  avgPaceSecondsPerKm: number;
+  daysActive: number;
+  consistencyScore: number;
+  trainingLoadScore: number;
+  snapshotDate?: string;
+  createdAt?: string;
+};
+
+type MetricsResponse = {
+  days7: MetricsWindow | null;
+  days28: MetricsWindow | null;
+  days56: MetricsWindow | null;
+};
+
 type TabMode =
   | "home"
-  | "new"
-  | "existing"
+  | "onboarding"
+  | "plan"
+  | "metrics"
   | "membership"
+  | "profile"
   | "login"
   | "register";
 
@@ -120,13 +148,52 @@ function loadPayPalSdk(clientId: string) {
     )}&vault=true&intent=subscription&currency=MXN`;
     script.async = true;
     script.dataset.paypalSdk = "true";
-
     script.onload = () => resolve();
     script.onerror = () =>
       reject(new Error("No fue posible cargar el SDK de PayPal"));
-
     document.body.appendChild(script);
   });
+}
+
+function formatPace(seconds?: number | null) {
+  if (!seconds || seconds <= 0) return "--";
+  const min = Math.floor(seconds / 60);
+  const sec = Math.round(seconds % 60)
+    .toString()
+    .padStart(2, "0");
+  return `${min}:${sec}/km`;
+}
+
+function formatTime(seconds?: number | null) {
+  if (!seconds || seconds <= 0) return "--";
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.round((seconds % 3600) / 60);
+  if (hours <= 0) return `${minutes} min`;
+  return `${hours}h ${minutes}m`;
+}
+
+function getAllowedDistances(planCode?: string | null) {
+  if (planCode === "starter") return ["5K", "10K", "15K"];
+  if (planCode === "performance" || planCode === "pro_coach") {
+    return ["5K", "10K", "15K", "21K", "42K"];
+  }
+  return ["5K", "10K", "15K"];
+}
+
+function getPlanLabel(planCode?: string | null) {
+  if (planCode === "starter") return "Starter";
+  if (planCode === "performance") return "Performance";
+  if (planCode === "pro_coach") return "Pro Coach";
+  return "Sin plan";
+}
+
+function getStatusLabel(status?: string | null) {
+  if (status === "active") return "Activa";
+  if (status === "pending_activation") return "Pendiente";
+  if (status === "cancelled") return "Cancelada";
+  if (status === "suspended") return "Suspendida";
+  if (status === "expired") return "Expirada";
+  return status || "Sin estado";
 }
 
 export default function App() {
@@ -137,6 +204,11 @@ export default function App() {
   const [authToken, setAuthToken] = useState("");
   const [authUser, setAuthUser] = useState<AuthUser | null>(null);
   const [entitlements, setEntitlements] = useState<Entitlements | null>(null);
+  const [membership, setMembership] = useState<Membership | null>(null);
+  const [strava, setStrava] = useState<StravaStatus>({
+    connected: false,
+    status: "not_connected",
+  });
 
   const [loginForm, setLoginForm] = useState({
     email: "",
@@ -153,26 +225,24 @@ export default function App() {
     name: "",
     email: "",
     goal: "Completar una carrera",
-    distance: "21K",
-    daysPerWeek: 5,
-    level: "Intermedio",
-    currentVolumeKm: 20,
+    distance: "10K",
+    daysPerWeek: 4,
+    level: "Principiante",
+    currentVolumeKm: 10,
     eventName: "",
     eventDate: "",
   });
 
   const [loading, setLoading] = useState(false);
-  const [lookupLoading, setLookupLoading] = useState(false);
   const [loginLoading, setLoginLoading] = useState(false);
   const [registerLoading, setRegisterLoading] = useState(false);
+  const [lookupLoading, setLookupLoading] = useState(false);
+  const [stravaLoading, setStravaLoading] = useState(false);
 
   const [result, setResult] = useState("");
   const [weeks, setWeeks] = useState<Week[]>([]);
-  const [lookupEmail, setLookupEmail] = useState("");
   const [selectedSession, setSelectedSession] = useState<Session | null>(null);
-  const [membership, setMembership] = useState<Membership | null>(null);
-  const [accessGranted, setAccessGranted] = useState(false);
-  const [currentUserId, setCurrentUserId] = useState("");
+  const [metrics, setMetrics] = useState<MetricsResponse | null>(null);
 
   const [paypalReady, setPaypalReady] = useState(false);
   const [paypalLoading, setPaypalLoading] = useState(false);
@@ -182,11 +252,46 @@ export default function App() {
   const performanceRef = useRef<HTMLDivElement | null>(null);
   const proRef = useRef<HTMLDivElement | null>(null);
 
+  const planCode = entitlements?.source_plan_code || membership?.plan_code || null;
+  const hasActiveMembership = Boolean(entitlements?.has_active_membership);
+  const canConnectStrava = Boolean(entitlements?.can_connect_strava);
+  const canUsePremiumPlanning = Boolean(entitlements?.can_use_premium_planning);
+  const allowedDistances = getAllowedDistances(planCode);
+
+  const currentWeek = useMemo(() => {
+    return weeks.length > 0 ? weeks[0] : null;
+  }, [weeks]);
+
+  const allSessions = useMemo(() => {
+    return currentWeek?.sessions || [];
+  }, [currentWeek]);
+
+  const totalSessions = allSessions.length;
+  const totalDistance = currentWeek?.total_target_distance || 0;
+  const todaysSession = allSessions[0] || null;
+  const primaryMetrics = metrics?.days28 || metrics?.days7 || null;
+
   useEffect(() => {
-    const update = () => setIsMobile(window.innerWidth < 960);
+    const update = () => setIsMobile(window.innerWidth < 920);
     update();
     window.addEventListener("resize", update);
     return () => window.removeEventListener("resize", update);
+  }, []);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const stravaStatus = params.get("strava");
+
+    if (stravaStatus) {
+      if (stravaStatus === "connected") {
+        setResult("Strava conectado correctamente. Ya puedes sincronizar tus actividades.");
+        setActiveTab("metrics");
+      } else {
+        setResult(`Resultado de Strava: ${stravaStatus}`);
+      }
+
+      window.history.replaceState({}, document.title, window.location.pathname);
+    }
   }, []);
 
   useEffect(() => {
@@ -205,34 +310,17 @@ export default function App() {
 
       try {
         setAuthLoading(true);
-
-        const res = await fetch(`${API_URL}/api/auth/me`, {
-          headers: {
-            Authorization: `Bearer ${authToken}`,
-          },
-        });
-
-        const data = await res.json();
-
-        if (!res.ok) {
-          throw new Error(data?.error || "Sesión inválida");
-        }
-
-        setAuthUser(data.user || null);
-        setEntitlements(data.entitlements || null);
-        setCurrentUserId(data.user?.id || "");
-        setLookupEmail(data.user?.email || "");
-        setForm((prev) => ({
-          ...prev,
-          name: data.user?.name || prev.name,
-          email: data.user?.email || prev.email,
-        }));
-        setActiveTab("home");
+        await refreshAuthMe(authToken);
+        setActiveTab((prev) =>
+          prev === "login" || prev === "register" ? "home" : prev
+        );
       } catch {
         localStorage.removeItem(AUTH_TOKEN_KEY);
         setAuthToken("");
         setAuthUser(null);
         setEntitlements(null);
+        setMembership(null);
+        setStrava({ connected: false, status: "not_connected" });
         setActiveTab("login");
       } finally {
         setAuthLoading(false);
@@ -242,158 +330,22 @@ export default function App() {
     bootstrapAuth();
   }, [authToken]);
 
-  const visibleWeek = useMemo(() => {
-    return weeks.length > 0 ? weeks[0] : null;
-  }, [weeks]);
+  useEffect(() => {
+    if (!authToken || !authUser) return;
 
-  const visibleWeeks = useMemo(() => {
-    return visibleWeek ? [visibleWeek] : [];
-  }, [visibleWeek]);
+    fetchPlanSilently();
+    fetchMetricsSilently();
+  }, [authToken, authUser?.id]);
 
-  const totalWeeks = visibleWeeks.length;
-  const totalSessions = useMemo(
-    () => visibleWeeks.reduce((acc, week) => acc + week.sessions.length, 0),
-    [visibleWeeks]
-  );
-  const totalDistance = useMemo(
-    () =>
-      visibleWeeks.reduce(
-        (acc, week) => acc + Number(week.total_target_distance || 0),
-        0
-      ),
-    [visibleWeeks]
-  );
-
-  const allSessions = useMemo(
-    () => visibleWeeks.flatMap((week) => week.sessions),
-    [visibleWeeks]
-  );
-
-  const todaysSession = allSessions[0] || null;
-  const readinessScore = visibleWeeks.length > 0 ? 82 : 0;
-  const recoveryScore = visibleWeeks.length > 0 ? 76 : 0;
-
-  const membershipLabel =
-    membership?.plan_code === "starter"
-      ? "Starter"
-      : membership?.plan_code === "performance"
-      ? "Performance"
-      : membership?.plan_code === "pro_coach"
-      ? "Pro Coach"
-      : membership?.plan_code || "Sin plan";
-
-  const membershipStatusLabel =
-    membership?.status === "active"
-      ? "Activa"
-      : membership?.status === "pending_activation"
-      ? "Pendiente"
-      : membership?.status === "cancelled"
-      ? "Cancelada"
-      : membership?.status === "suspended"
-      ? "Suspendida"
-      : membership?.status === "expired"
-      ? "Expirada"
-      : membership?.status || "Sin estado";
-
-  const membershipRenewalLabel = membership?.current_period_end
-    ? new Date(membership.current_period_end).toLocaleDateString("es-MX", {
-        year: "numeric",
-        month: "long",
-        day: "numeric",
-      })
-    : "Sin fecha disponible";
-
-  const isStarter = entitlements?.source_plan_code === "starter";
-  const isPerformance = entitlements?.source_plan_code === "performance";
-  const isProCoach = entitlements?.source_plan_code === "pro_coach";
-  const canConnectStrava = Boolean(entitlements?.can_connect_strava);
-  const canUsePremiumPlanning = Boolean(entitlements?.can_use_premium_planning);
-
-  const handleChange = (
-    e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>
-  ) => {
-    const { name, value } = e.target;
-
-    setForm((prev) => ({
-      ...prev,
-      [name]:
-        name === "daysPerWeek" || name === "currentVolumeKm"
-          ? Number(value)
-          : value,
-    }));
-  };
-
-  const resetPlanState = () => {
-    setResult("");
-    setWeeks([]);
-    setSelectedSession(null);
-  };
-
-  const fetchPlan = async (id: string) => {
-    const readRes = await fetch(`${API_URL}/api/plan/${id}`);
-    const readData = await readRes.json();
-
-    if (!readRes.ok) {
-      throw new Error(readData?.error || "No fue posible consultar tu plan");
+  useEffect(() => {
+    const currentDistance = form.distance;
+    if (!allowedDistances.includes(currentDistance)) {
+      setForm((prev) => ({
+        ...prev,
+        distance: allowedDistances[0] || "5K",
+      }));
     }
-
-    setWeeks(readData.weeks || []);
-  };
-
-  const fetchMembershipStatus = async (email: string) => {
-    const res = await fetch(`${API_URL}/api/membership/status`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ email }),
-    });
-
-    const data = await res.json();
-
-    if (!res.ok) {
-      throw new Error(data?.error || "No fue posible consultar la membresía");
-    }
-
-    setMembership(data.membership || null);
-    setAccessGranted(Boolean(data.accessGranted));
-    return data;
-  };
-
-  const fetchPaypalConfig = async () => {
-    const res = await fetch(`${API_URL}/api/paypal/config`);
-    const data = await res.json();
-
-    if (!res.ok || !data?.clientId) {
-      throw new Error("No fue posible obtener la configuración de PayPal");
-    }
-
-    return data.clientId as string;
-  };
-
-  const refreshAuthMe = async (token: string) => {
-    const res = await fetch(`${API_URL}/api/auth/me`, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-      },
-    });
-
-    const data = await res.json();
-
-    if (!res.ok) {
-      throw new Error(data?.error || "No fue posible consultar la sesión");
-    }
-
-    setAuthUser(data.user || null);
-    setEntitlements(data.entitlements || null);
-    setCurrentUserId(data.user?.id || "");
-    setLookupEmail(data.user?.email || "");
-    setForm((prev) => ({
-      ...prev,
-      name: data.user?.name || prev.name,
-      email: data.user?.email || prev.email,
-    }));
-  };
+  }, [planCode]);
 
   useEffect(() => {
     let cancelled = false;
@@ -422,9 +374,7 @@ export default function App() {
           );
         }
       } finally {
-        if (!cancelled) {
-          setPaypalLoading(false);
-        }
+        if (!cancelled) setPaypalLoading(false);
       }
     }
 
@@ -440,10 +390,10 @@ export default function App() {
 
     const renderButton = async (
       container: HTMLDivElement | null,
-      planId: string,
-      planLabel: string
+      paypalPlanId: string,
+      label: string
     ) => {
-      if (!container) return;
+      if (!container || !authUser?.id) return;
 
       container.innerHTML = "";
 
@@ -457,35 +407,25 @@ export default function App() {
           },
           createSubscription: (_data, actions) => {
             return actions.subscription.create({
-              plan_id: planId,
-              custom_id: currentUserId || undefined,
+              plan_id: paypalPlanId,
+              custom_id: authUser.id,
             });
           },
           onApprove: async (data) => {
             try {
               const subscriptionId = data.subscriptionID || "";
+              if (!subscriptionId) throw new Error("PayPal no devolvió subscriptionID");
 
-              if (!subscriptionId) {
-                throw new Error("PayPal no devolvió subscriptionID");
-              }
-
-              if (!currentUserId) {
-                throw new Error("No se encontró el userId actual");
-              }
-
-              const linkRes = await fetch(
-                `${API_URL}/api/paypal/link-subscription`,
-                {
-                  method: "POST",
-                  headers: {
-                    "Content-Type": "application/json",
-                  },
-                  body: JSON.stringify({
-                    userId: currentUserId,
-                    subscriptionId,
-                  }),
-                }
-              );
+              const linkRes = await fetch(`${API_URL}/api/paypal/link-subscription`, {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                },
+                body: JSON.stringify({
+                  userId: authUser.id,
+                  subscriptionId,
+                }),
+              });
 
               const linkData = await linkRes.json();
 
@@ -495,31 +435,15 @@ export default function App() {
                 );
               }
 
-              setMembership(linkData.membership || null);
-              setAccessGranted(
-                linkData.membershipStatus === "active" ||
-                  linkData.status === "active"
-              );
-
               if (authToken) {
                 await refreshAuthMe(authToken);
+                await fetchPlanSilently();
+                await fetchMetricsSilently();
               }
 
-              if (currentUserId) {
-                await fetchPlan(currentUserId);
-              }
-
-              if (lookupEmail) {
-                await fetchMembershipStatus(lookupEmail);
-              }
-
-              setResult(
-                `Suscripción ${planLabel} activada correctamente. Ya puedes consultar tu plan.`
-              );
-
+              setResult(`Suscripción ${label} activada correctamente.`);
               setActiveTab("home");
             } catch (error) {
-              console.error(error);
               setResult(
                 error instanceof Error
                   ? error.message
@@ -527,68 +451,93 @@ export default function App() {
               );
             }
           },
-          onError: (error) => {
-            console.error(error);
-            setResult(`Ocurrió un error al iniciar la suscripción ${planLabel}.`);
+          onError: () => {
+            setResult(`Ocurrió un error al iniciar la suscripción ${label}.`);
           },
         })
         .render(container);
     };
 
     renderButton(starterRef.current, PAYPAL_STARTER_PLAN_ID, "Starter");
-    renderButton(
-      performanceRef.current,
-      PAYPAL_PERFORMANCE_PLAN_ID,
-      "Performance"
-    );
+    renderButton(performanceRef.current, PAYPAL_PERFORMANCE_PLAN_ID, "Performance");
     renderButton(proRef.current, PAYPAL_PRO_PLAN_ID, "Pro Coach");
-  }, [activeTab, paypalReady, currentUserId, authToken, lookupEmail]);
+  }, [activeTab, paypalReady, authUser?.id, authToken]);
 
-  const handleRegister = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setRegisterLoading(true);
-    setResult("");
+  async function refreshAuthMe(token: string) {
+    const res = await fetch(`${API_URL}/api/auth/me`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    });
+
+    const data = await res.json();
+
+    if (!res.ok) {
+      throw new Error(data?.error || "No fue posible consultar la sesión");
+    }
+
+    setAuthUser(data.user || null);
+    setEntitlements(data.entitlements || null);
+    setMembership(data.membership || null);
+    setStrava(
+      data.strava || {
+        connected: false,
+        status: "not_connected",
+      }
+    );
+
+    setForm((prev) => ({
+      ...prev,
+      name: data.user?.name || prev.name,
+      email: data.user?.email || prev.email,
+    }));
+  }
+
+  async function fetchPaypalConfig() {
+    const res = await fetch(`${API_URL}/api/paypal/config`);
+    const data = await res.json();
+
+    if (!res.ok || !data?.clientId) {
+      throw new Error("No fue posible obtener la configuración de PayPal");
+    }
+
+    return data.clientId as string;
+  }
+
+  async function fetchPlanSilently() {
+    if (!authUser?.id) return;
 
     try {
-      const res = await fetch(`${API_URL}/api/auth/register`, {
-        method: "POST",
+      const res = await fetch(`${API_URL}/api/plan/${authUser.id}`);
+      const data = await res.json();
+
+      if (res.ok) {
+        setWeeks(data.weeks || []);
+      }
+    } catch {
+      // silencio intencional
+    }
+  }
+
+  async function fetchMetricsSilently() {
+    if (!authToken) return;
+
+    try {
+      const res = await fetch(`${API_URL}/api/metrics/me`, {
         headers: {
-          "Content-Type": "application/json",
+          Authorization: `Bearer ${authToken}`,
         },
-        body: JSON.stringify(registerForm),
       });
 
       const data = await res.json();
 
-      if (!res.ok) {
-        throw new Error(data?.error || "No fue posible crear la cuenta");
+      if (res.ok) {
+        setMetrics(data.metrics || null);
       }
-
-      const token = data.token || "";
-      if (!token) {
-        throw new Error("No se recibió token de sesión");
-      }
-
-      localStorage.setItem(AUTH_TOKEN_KEY, token);
-      setAuthToken(token);
-      setAuthUser(data.user || null);
-      setCurrentUserId(data.user?.id || "");
-      setLookupEmail(data.user?.email || "");
-      setForm((prev) => ({
-        ...prev,
-        name: data.user?.name || prev.name,
-        email: data.user?.email || prev.email,
-      }));
-      setResult("Cuenta creada correctamente. Completa tu onboarding.");
-      setActiveTab("new");
-    } catch (error) {
-      setResult(
-        error instanceof Error ? error.message : "Ocurrió un error inesperado"
-      );
-    } finally {
-      setRegisterLoading(false);
+    } catch {
+      // silencio intencional
     }
-  };
+  }
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -611,21 +560,52 @@ export default function App() {
       }
 
       const token = data.token || "";
-      if (!token) {
-        throw new Error("No se recibió token de sesión");
-      }
-
       localStorage.setItem(AUTH_TOKEN_KEY, token);
       setAuthToken(token);
       await refreshAuthMe(token);
-      setResult("Sesión iniciada correctamente.");
       setActiveTab("home");
+      setResult("Sesión iniciada correctamente.");
     } catch (error) {
       setResult(
         error instanceof Error ? error.message : "Ocurrió un error inesperado"
       );
     } finally {
       setLoginLoading(false);
+    }
+  };
+
+  const handleRegister = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setRegisterLoading(true);
+    setResult("");
+
+    try {
+      const res = await fetch(`${API_URL}/api/auth/register`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(registerForm),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(data?.error || "No fue posible crear la cuenta");
+      }
+
+      const token = data.token || "";
+      localStorage.setItem(AUTH_TOKEN_KEY, token);
+      setAuthToken(token);
+      await refreshAuthMe(token);
+      setActiveTab("onboarding");
+      setResult("Cuenta creada correctamente. Completa tu perfil para generar tu plan.");
+    } catch (error) {
+      setResult(
+        error instanceof Error ? error.message : "Ocurrió un error inesperado"
+      );
+    } finally {
+      setRegisterLoading(false);
     }
   };
 
@@ -640,65 +620,62 @@ export default function App() {
         });
       }
     } catch {
-      // ignore
+      // silencio
     } finally {
       localStorage.removeItem(AUTH_TOKEN_KEY);
       setAuthToken("");
       setAuthUser(null);
       setEntitlements(null);
       setMembership(null);
-      setAccessGranted(false);
       setWeeks([]);
-      setCurrentUserId("");
-      setLookupEmail("");
-      setLoginForm({ email: "", password: "" });
-      setRegisterForm({ name: "", email: "", password: "" });
+      setMetrics(null);
+      setStrava({ connected: false, status: "not_connected" });
       setActiveTab("login");
       setResult("Sesión cerrada.");
     }
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleOnboarding = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!authUser) return;
+
     setLoading(true);
-    resetPlanState();
-    setMembership(null);
-    setAccessGranted(false);
+    setResult("");
 
     try {
       const onboardingPayload = {
         ...form,
-        email: authUser?.email || form.email,
-        name: authUser?.name || form.name,
+        name: authUser.name,
+        email: authUser.email,
+        userId: authUser.id,
       };
 
-      const planRes = await fetch(`${API_URL}/api/plan/generate`, {
+      const res = await fetch(`${API_URL}/api/onboarding`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({
-          userId: currentUserId,
-          ...onboardingPayload,
-        }),
+        body: JSON.stringify(onboardingPayload),
       });
 
-      const planData = await planRes.json();
+      const data = await res.json();
 
-      if (!planRes.ok) {
-        throw new Error(planData?.error || "No fue posible generar tu plan");
+      if (!res.ok) {
+        throw new Error(data?.error || "No fue posible guardar onboarding");
       }
 
-      setLookupEmail(authUser?.email || form.email);
-      setForm((prev) => ({
-        ...prev,
-        email: authUser?.email || prev.email,
-        name: authUser?.name || prev.name,
-      }));
       setResult(
-        "Tu perfil fue guardado. Para desbloquear o mejorar el acceso al plan, activa una membresía."
+        hasActiveMembership
+          ? "Perfil guardado. Ahora puedes consultar tu plan."
+          : "Perfil guardado. Activa una membresía para generar tu plan."
       );
-      setActiveTab("membership");
+
+      if (hasActiveMembership) {
+        await regeneratePlan();
+        setActiveTab("plan");
+      } else {
+        setActiveTab("membership");
+      }
     } catch (error) {
       setResult(
         error instanceof Error ? error.message : "Ocurrió un error inesperado"
@@ -708,53 +685,36 @@ export default function App() {
     }
   };
 
-  const handleLookup = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const regeneratePlan = async () => {
+    if (!authUser) return;
+
     setLookupLoading(true);
-    resetPlanState();
-    setMembership(null);
-    setAccessGranted(false);
+    setResult("");
 
     try {
-      const emailToLookup = lookupEmail || authUser?.email || "";
+      const payload = {
+        ...form,
+        name: authUser.name,
+        email: authUser.email,
+        userId: authUser.id,
+      };
 
-      const userRes = await fetch(`${API_URL}/api/user/find`, {
+      const res = await fetch(`${API_URL}/api/plan/generate`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ email: emailToLookup }),
+        body: JSON.stringify(payload),
       });
 
-      const userData = await userRes.json();
+      const data = await res.json();
 
-      if (!userRes.ok) {
-        throw new Error(
-          userData?.error || "No fue posible encontrar ese usuario"
-        );
+      if (!res.ok) {
+        throw new Error(data?.error || "No fue posible generar el plan");
       }
 
-      setCurrentUserId(userData.user.id);
-
-      const membershipData = await fetchMembershipStatus(emailToLookup);
-
-      if (!membershipData.accessGranted) {
-        setResult(
-          "Tu membresía no está activa todavía. Activa tu plan para desbloquear la semana visible."
-        );
-        setActiveTab("membership");
-        return;
-      }
-
-      const existingUserId = userData.user.id;
-      await fetchPlan(existingUserId);
-
-      if (authToken) {
-        await refreshAuthMe(authToken);
-      }
-
-      setResult(`Plan cargado correctamente para ${userData.user.email}.`);
-      setActiveTab("home");
+      await fetchPlanSilently();
+      setResult("Plan generado correctamente.");
     } catch (error) {
       setResult(
         error instanceof Error ? error.message : "Ocurrió un error inesperado"
@@ -764,14 +724,117 @@ export default function App() {
     }
   };
 
+  const connectStrava = async () => {
+    if (!authToken) return;
+
+    setStravaLoading(true);
+    setResult("");
+
+    try {
+      const res = await fetch(`${API_URL}/api/strava/connect-url`, {
+        headers: {
+          Authorization: `Bearer ${authToken}`,
+        },
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(data?.error || "No fue posible generar URL de Strava");
+      }
+
+      window.location.href = data.url;
+    } catch (error) {
+      setResult(
+        error instanceof Error ? error.message : "Ocurrió un error inesperado"
+      );
+    } finally {
+      setStravaLoading(false);
+    }
+  };
+
+  const syncStrava = async () => {
+    if (!authToken) return;
+
+    setStravaLoading(true);
+    setResult("");
+
+    try {
+      const res = await fetch(`${API_URL}/api/strava/sync`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${authToken}`,
+        },
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(data?.error || "No fue posible sincronizar Strava");
+      }
+
+      setMetrics(data.metrics || null);
+      await refreshAuthMe(authToken);
+      await fetchMetricsSilently();
+
+      setResult(
+        `Strava sincronizado. Actividades consultadas: ${data.fetched || 0}. Actividades guardadas/actualizadas: ${data.stored || 0}.`
+      );
+    } catch (error) {
+      setResult(
+        error instanceof Error ? error.message : "Ocurrió un error inesperado"
+      );
+    } finally {
+      setStravaLoading(false);
+    }
+  };
+
+  const saveCheckin = async () => {
+    if (!authToken) return;
+
+    setLoading(true);
+    setResult("");
+
+    try {
+      const res = await fetch(`${API_URL}/api/checkins/weekly`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${authToken}`,
+        },
+        body: JSON.stringify({
+          trainingPlanId: null,
+          weekNumber: currentWeek?.week_number || 1,
+          energyScore: 4,
+          fatigueScore: 2,
+          sorenessScore: 2,
+          sleepQualityScore: 4,
+          notes: "Check-in rápido desde dashboard.",
+        }),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(data?.error || "No fue posible guardar check-in");
+      }
+
+      setResult(`Check-in guardado. Recomendación: ${data.recommendation}`);
+    } catch (error) {
+      setResult(
+        error instanceof Error ? error.message : "Ocurrió un error inesperado"
+      );
+    } finally {
+      setLoading(false);
+    }
+  };
+
   if (authLoading) {
     return (
-      <div style={loadingScreenStyle}>
+      <div style={loadingPageStyle}>
         <div style={loadingCardStyle}>
-          <div style={logoBoxStyle}>trAIning</div>
-          <div style={{ marginTop: 18, color: "rgba(255,255,255,0.72)" }}>
-            Cargando sesión...
-          </div>
+          <div style={logoStyle}>trAIning</div>
+          <p style={mutedTextStyle}>Cargando sesión...</p>
         </div>
       </div>
     );
@@ -779,217 +842,90 @@ export default function App() {
 
   return (
     <div style={pageStyle}>
-      <div style={gridOverlayStyle} />
-      <div style={glowOne} />
-      <div style={glowTwo} />
-      <div style={glowThree} />
+      <div style={backgroundGlowOneStyle} />
+      <div style={backgroundGlowTwoStyle} />
 
       <div
         style={{
-          ...wrapperStyle,
-          gridTemplateColumns: isMobile ? "1fr" : "0.95fr 1.05fr",
-          gap: isMobile ? 18 : 28,
-          maxWidth: isMobile ? 640 : 1280,
+          ...appShellStyle,
+          gridTemplateColumns: isMobile ? "1fr" : "320px 1fr",
         }}
       >
-        <aside
-          style={{
-            ...brandPanelStyle,
-            minHeight: isMobile ? "auto" : 760,
-            padding: isMobile ? 22 : 36,
-            order: isMobile ? 2 : 1,
-          }}
-        >
-          <div>
-            <div style={logoRowStyle}>
-              <div style={logoBoxStyle}>trAIning</div>
-              <span style={chipStyle}>Running Intelligence</span>
-            </div>
+        {authUser && (
+          <aside style={sideBarStyle}>
+            <div>
+              <div style={logoStyle}>trAIning</div>
+              <p style={smallCapsStyle}>Running Intelligence</p>
 
-            <p style={eyebrowStyle}>ENTRENA INTELIGENTE</p>
-            <h1
-              style={{
-                ...titleStyle,
-                fontSize: isMobile ? 34 : 48,
-                maxWidth: "100%",
-              }}
-            >
-              Entrena con estructura, claridad y una vista real de tu progreso.
-            </h1>
-            <p
-              style={{
-                ...subtitleStyle,
-                maxWidth: "100%",
-                fontSize: isMobile ? 15 : 16,
-              }}
-            >
-              Ahora con acceso por cuenta, membresías, permisos por plan y base
-              lista para métricas reales y Strava.
-            </p>
-          </div>
-
-          <div
-            style={{
-              ...featureGridStyle,
-              gridTemplateColumns: isMobile
-                ? "1fr 1fr"
-                : "repeat(2, minmax(0, 1fr))",
-            }}
-          >
-            <div style={featureCardStyle}>
-              <span style={featureLabelStyle}>Usuario</span>
-              <strong style={featureValueStyle}>
-                {authUser?.name || "Invitado"}
-              </strong>
-            </div>
-            <div style={featureCardStyle}>
-              <span style={featureLabelStyle}>Plan actual</span>
-              <strong style={featureValueStyle}>
-                {entitlements?.source_plan_code || "Sin plan"}
-              </strong>
-            </div>
-            <div style={featureCardStyle}>
-              <span style={featureLabelStyle}>Strava</span>
-              <strong style={featureValueStyle}>
-                {canConnectStrava ? "Disponible" : "Bloqueado"}
-              </strong>
-            </div>
-            <div style={featureCardStyle}>
-              <span style={featureLabelStyle}>Acceso</span>
-              <strong style={featureValueStyle}>
-                {accessGranted ? "Activo" : "Pendiente"}
-              </strong>
-            </div>
-          </div>
-
-          <div
-            style={{
-              ...statsRowStyle,
-              gridTemplateColumns: isMobile
-                ? "1fr 1fr 1fr"
-                : "repeat(3, minmax(0, 1fr))",
-            }}
-          >
-            <div style={statCardStyle}>
-              <div style={statValueStyle}>{totalWeeks || "--"}</div>
-              <div style={statLabelStyle}>Semana visible</div>
-            </div>
-            <div style={statCardStyle}>
-              <div style={statValueStyle}>{totalSessions || "--"}</div>
-              <div style={statLabelStyle}>Sesiones cargadas</div>
-            </div>
-            <div style={statCardStyle}>
-              <div style={statValueStyle}>
-                {totalDistance ? `${totalDistance}k` : "--"}
-              </div>
-              <div style={statLabelStyle}>Carga semanal</div>
-            </div>
-          </div>
-        </aside>
-
-        <main
-          style={{
-            ...mainPanelStyle,
-            order: isMobile ? 1 : 2,
-          }}
-        >
-          {authUser ? (
-            <div
-              style={{
-                ...tabsWrapStyle,
-                width: isMobile ? "100%" : "fit-content",
-                display: isMobile ? "grid" : "inline-flex",
-                gridTemplateColumns: isMobile ? "1fr 1fr" : undefined,
-              }}
-            >
-              <button
-                onClick={() => setActiveTab("home")}
-                style={{
-                  ...tabButtonStyle,
-                  ...(activeTab === "home" ? activeTabButtonStyle : {}),
-                }}
-              >
-                Home
-              </button>
-              <button
-                onClick={() => setActiveTab("new")}
-                style={{
-                  ...tabButtonStyle,
-                  ...(activeTab === "new" ? activeTabButtonStyle : {}),
-                }}
-              >
-                Onboarding
-              </button>
-              <button
-                onClick={() => setActiveTab("existing")}
-                style={{
-                  ...tabButtonStyle,
-                  ...(activeTab === "existing" ? activeTabButtonStyle : {}),
-                }}
-              >
-                Mi plan
-              </button>
-              <button
-                onClick={() => setActiveTab("membership")}
-                style={{
-                  ...tabButtonStyle,
-                  ...(activeTab === "membership" ? activeTabButtonStyle : {}),
-                }}
-              >
-                Membresía
-              </button>
-            </div>
-          ) : null}
-
-          {activeTab === "login" && (
-            <section style={{ ...cardStyle, padding: isMobile ? 20 : 32 }}>
-              <div style={sectionHeaderStyle}>
-                <span style={badgeStyle}>Acceso</span>
-                <h2 style={{ ...formTitleStyle, fontSize: isMobile ? 26 : 32 }}>
-                  Iniciar sesión
-                </h2>
-                <p style={formTextStyle}>
-                  Accede con tu correo y contraseña para ver tu plan, membresía
-                  y próximas funciones de métricas reales.
-                </p>
+              <div style={profileBoxStyle}>
+                <div style={profileNameStyle}>{authUser.name}</div>
+                <div style={profileEmailStyle}>{authUser.email}</div>
+                <div style={planPillStyle}>{getPlanLabel(planCode)}</div>
               </div>
 
-              <form onSubmit={handleLogin} style={formStyle}>
-                <div style={fieldGroupStyle}>
-                  <label style={labelStyle}>Correo</label>
-                  <input
-                    type="email"
-                    value={loginForm.email}
-                    onChange={(e) =>
-                      setLoginForm((prev) => ({
-                        ...prev,
-                        email: e.target.value,
-                      }))
-                    }
-                    required
-                    style={inputStyle}
-                    placeholder="tucorreo@email.com"
-                  />
-                </div>
+              <nav style={navStyle}>
+                <button style={navButtonStyle(activeTab === "home")} onClick={() => setActiveTab("home")}>
+                  Home
+                </button>
+                <button style={navButtonStyle(activeTab === "onboarding")} onClick={() => setActiveTab("onboarding")}>
+                  Onboarding
+                </button>
+                <button style={navButtonStyle(activeTab === "plan")} onClick={() => setActiveTab("plan")}>
+                  Mi plan
+                </button>
+                <button style={navButtonStyle(activeTab === "metrics")} onClick={() => setActiveTab("metrics")}>
+                  Métricas
+                </button>
+                <button style={navButtonStyle(activeTab === "membership")} onClick={() => setActiveTab("membership")}>
+                  Membresía
+                </button>
+                <button style={navButtonStyle(activeTab === "profile")} onClick={() => setActiveTab("profile")}>
+                  Perfil
+                </button>
+              </nav>
+            </div>
 
-                <div style={fieldGroupStyle}>
-                  <label style={labelStyle}>Contraseña</label>
-                  <input
-                    type="password"
-                    value={loginForm.password}
-                    onChange={(e) =>
-                      setLoginForm((prev) => ({
-                        ...prev,
-                        password: e.target.value,
-                      }))
-                    }
-                    required
-                    style={inputStyle}
-                    placeholder="********"
-                  />
-                </div>
+            <button style={logoutButtonStyle} onClick={handleLogout}>
+              Cerrar sesión
+            </button>
+          </aside>
+        )}
 
-                <button type="submit" disabled={loginLoading} style={buttonStyle}>
+        <main style={mainStyle}>
+          {!authUser && activeTab === "login" && (
+            <section style={cardStyle}>
+              <span style={badgeStyle}>Acceso</span>
+              <h1 style={titleStyle}>Iniciar sesión</h1>
+              <p style={textStyle}>
+                Entra para consultar tu plan, membresía, Strava y métricas.
+              </p>
+
+              <form style={formStyle} onSubmit={handleLogin}>
+                <label style={labelStyle}>Correo</label>
+                <input
+                  style={inputStyle}
+                  type="email"
+                  value={loginForm.email}
+                  onChange={(e) =>
+                    setLoginForm((prev) => ({ ...prev, email: e.target.value }))
+                  }
+                  required
+                  placeholder="tucorreo@email.com"
+                />
+
+                <label style={labelStyle}>Contraseña</label>
+                <input
+                  style={inputStyle}
+                  type="password"
+                  value={loginForm.password}
+                  onChange={(e) =>
+                    setLoginForm((prev) => ({ ...prev, password: e.target.value }))
+                  }
+                  required
+                  placeholder="********"
+                />
+
+                <button style={primaryButtonStyle} disabled={loginLoading}>
                   {loginLoading ? "Entrando..." : "Iniciar sesión"}
                 </button>
 
@@ -1004,77 +940,56 @@ export default function App() {
             </section>
           )}
 
-          {activeTab === "register" && (
-            <section style={{ ...cardStyle, padding: isMobile ? 20 : 32 }}>
-              <div style={sectionHeaderStyle}>
-                <span style={badgeStyle}>Registro</span>
-                <h2 style={{ ...formTitleStyle, fontSize: isMobile ? 26 : 32 }}>
-                  Crear cuenta
-                </h2>
-                <p style={formTextStyle}>
-                  Crea tu usuario para acceder a onboarding, membresías y plan.
-                </p>
-              </div>
+          {!authUser && activeTab === "register" && (
+            <section style={cardStyle}>
+              <span style={badgeStyle}>Registro</span>
+              <h1 style={titleStyle}>Crear cuenta</h1>
+              <p style={textStyle}>
+                Crea tu usuario para generar tu plan y activar tu membresía.
+              </p>
 
-              <form onSubmit={handleRegister} style={formStyle}>
-                <div style={fieldGroupStyle}>
-                  <label style={labelStyle}>Nombre</label>
-                  <input
-                    type="text"
-                    value={registerForm.name}
-                    onChange={(e) =>
-                      setRegisterForm((prev) => ({
-                        ...prev,
-                        name: e.target.value,
-                      }))
-                    }
-                    required
-                    style={inputStyle}
-                    placeholder="Tu nombre"
-                  />
-                </div>
+              <form style={formStyle} onSubmit={handleRegister}>
+                <label style={labelStyle}>Nombre</label>
+                <input
+                  style={inputStyle}
+                  value={registerForm.name}
+                  onChange={(e) =>
+                    setRegisterForm((prev) => ({ ...prev, name: e.target.value }))
+                  }
+                  required
+                  placeholder="Tu nombre"
+                />
 
-                <div style={fieldGroupStyle}>
-                  <label style={labelStyle}>Correo</label>
-                  <input
-                    type="email"
-                    value={registerForm.email}
-                    onChange={(e) =>
-                      setRegisterForm((prev) => ({
-                        ...prev,
-                        email: e.target.value,
-                      }))
-                    }
-                    required
-                    style={inputStyle}
-                    placeholder="tucorreo@email.com"
-                  />
-                </div>
+                <label style={labelStyle}>Correo</label>
+                <input
+                  style={inputStyle}
+                  type="email"
+                  value={registerForm.email}
+                  onChange={(e) =>
+                    setRegisterForm((prev) => ({ ...prev, email: e.target.value }))
+                  }
+                  required
+                  placeholder="tucorreo@email.com"
+                />
 
-                <div style={fieldGroupStyle}>
-                  <label style={labelStyle}>Contraseña</label>
-                  <input
-                    type="password"
-                    value={registerForm.password}
-                    onChange={(e) =>
-                      setRegisterForm((prev) => ({
-                        ...prev,
-                        password: e.target.value,
-                      }))
-                    }
-                    required
-                    minLength={8}
-                    style={inputStyle}
-                    placeholder="Mínimo 8 caracteres"
-                  />
-                </div>
+                <label style={labelStyle}>Contraseña</label>
+                <input
+                  style={inputStyle}
+                  type="password"
+                  minLength={8}
+                  value={registerForm.password}
+                  onChange={(e) =>
+                    setRegisterForm((prev) => ({
+                      ...prev,
+                      password: e.target.value,
+                    }))
+                  }
+                  required
+                  placeholder="Mínimo 8 caracteres"
+                />
 
-                <button
-                  type="submit"
-                  disabled={registerLoading}
-                  style={buttonStyle}
-                >
-                  {registerLoading ? "Creando cuenta..." : "Crear cuenta"}
+                <button style={primaryButtonStyle} disabled={registerLoading}>
+                  {registerLoading ? "Creando..." : "Crear cuenta"}
                 </button>
 
                 <button
@@ -1089,353 +1004,162 @@ export default function App() {
           )}
 
           {authUser && activeTab === "home" && (
-            <section style={{ ...cardStyle, padding: isMobile ? 20 : 28 }}>
+            <section style={cardStyle}>
               <div style={sectionHeaderStyle}>
                 <span style={badgeStyle}>Dashboard</span>
-                <h2 style={{ ...formTitleStyle, fontSize: isMobile ? 26 : 32 }}>
-                  Resumen de entrenamiento
-                </h2>
-                <p style={formTextStyle}>
-                  {accessGranted
-                    ? "Una vista rápida de tu estado actual, tu próxima sesión y tu semana visible."
-                    : "Completa tu membresía para desbloquear el plan y preparar la siguiente capa con métricas reales."}
+                <h1 style={titleStyle}>Tu entrenamiento</h1>
+                <p style={textStyle}>
+                  Genera tu plan, conecta Strava y mide tu progreso desde una sola vista.
                 </p>
               </div>
 
-              <div style={profileTopBarStyle}>
-                <div>
-                  <div style={profileNameStyle}>{authUser.name}</div>
-                  <div style={profileEmailStyle}>{authUser.email}</div>
+              <div style={metricGridStyle}>
+                <div style={statCardStyle}>
+                  <div style={statLabelStyle}>Membresía</div>
+                  <div style={statValueStyle}>{getPlanLabel(planCode)}</div>
+                  <div style={statHintStyle}>{getStatusLabel(membership?.status)}</div>
                 </div>
-                <button style={logoutButtonStyle} onClick={handleLogout}>
-                  Cerrar sesión
-                </button>
+
+                <div style={statCardStyle}>
+                  <div style={statLabelStyle}>Semana visible</div>
+                  <div style={statValueStyle}>{currentWeek ? `#${currentWeek.week_number}` : "--"}</div>
+                  <div style={statHintStyle}>{currentWeek?.focus_label || "Sin plan cargado"}</div>
+                </div>
+
+                <div style={statCardStyle}>
+                  <div style={statLabelStyle}>Km planeados</div>
+                  <div style={statValueStyle}>{totalDistance ? `${totalDistance} km` : "--"}</div>
+                  <div style={statHintStyle}>{totalSessions ? `${totalSessions} sesiones` : "Sin sesiones"}</div>
+                </div>
+
+                <div style={statCardStyle}>
+                  <div style={statLabelStyle}>Strava</div>
+                  <div style={statValueStyle}>{strava.connected ? "Conectado" : "No conectado"}</div>
+                  <div style={statHintStyle}>
+                    {canConnectStrava ? "Disponible" : "Requiere Performance"}
+                  </div>
+                </div>
               </div>
 
-              {!accessGranted && (
-                <div style={lockedCardStyle}>
-                  <div style={lockedTitleStyle}>Acceso bloqueado</div>
-                  <div style={lockedTextStyle}>
-                    Tu membresía aún no está activa. Completa tu pago para
-                    habilitar el plan y las funciones avanzadas por nivel.
-                  </div>
-                  <button
-                    style={heroButtonStyle}
-                    onClick={() => setActiveTab("membership")}
-                  >
-                    Ver membresías
-                  </button>
-                </div>
-              )}
+              <div
+                style={{
+                  ...splitGridStyle,
+                  gridTemplateColumns: isMobile ? "1fr" : "1.15fr 0.85fr",
+                }}
+              >
+                <div style={highlightCardStyle}>
+                  <span style={badgeDarkStyle}>Sesión destacada</span>
+                  <h2 style={highlightTitleStyle}>
+                    {todaysSession?.title || "Aún no tienes plan cargado"}
+                  </h2>
+                  <p style={textStyle}>
+                    {todaysSession?.objective ||
+                      "Completa tu onboarding y activa tu membresía para generar un plan estándar."}
+                  </p>
 
-              {accessGranted && (
-                <>
-                  <div
-                    style={{
-                      ...membershipOverviewCardStyle,
-                      marginBottom: 18,
-                    }}
-                  >
-                    <div style={membershipOverviewHeaderStyle}>
-                      <div>
-                        <div style={membershipOverviewEyebrowStyle}>
-                          Mi membresía
-                        </div>
-                        <div style={membershipOverviewTitleStyle}>
-                          {membershipLabel}
-                        </div>
-                      </div>
-                      <div style={membershipOverviewStatusBadgeStyle}>
-                        {membershipStatusLabel}
-                      </div>
-                    </div>
-
-                    <div
-                      style={{
-                        ...membershipOverviewGridStyle,
-                        gridTemplateColumns: isMobile
-                          ? "1fr"
-                          : "repeat(4, minmax(0, 1fr))",
-                      }}
+                  {todaysSession && (
+                    <button
+                      style={primaryButtonStyle}
+                      onClick={() => setSelectedSession(todaysSession)}
                     >
-                      <div style={membershipOverviewItemStyle}>
-                        <div style={membershipOverviewItemLabelStyle}>Plan</div>
-                        <div style={membershipOverviewItemValueStyle}>
-                          {membershipLabel}
-                        </div>
-                      </div>
-
-                      <div style={membershipOverviewItemStyle}>
-                        <div style={membershipOverviewItemLabelStyle}>Estado</div>
-                        <div style={membershipOverviewItemValueStyle}>
-                          {membershipStatusLabel}
-                        </div>
-                      </div>
-
-                      <div style={membershipOverviewItemStyle}>
-                        <div style={membershipOverviewItemLabelStyle}>
-                          Permisos
-                        </div>
-                        <div style={membershipOverviewItemValueStyle}>
-                          {isStarter && "Base"}
-                          {isPerformance && "Base + Strava"}
-                          {isProCoach && "Base + Strava + Premium"}
-                          {!isStarter && !isPerformance && !isProCoach && "Sin plan"}
-                        </div>
-                      </div>
-
-                      <div style={membershipOverviewItemStyle}>
-                        <div style={membershipOverviewItemLabelStyle}>
-                          Próxima renovación
-                        </div>
-                        <div style={membershipOverviewItemValueStyle}>
-                          {membershipRenewalLabel}
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div style={entitlementsCardStyle}>
-                    <div style={entitlementsTitleStyle}>Funciones habilitadas</div>
-                    <div
-                      style={{
-                        ...entitlementsGridStyle,
-                        gridTemplateColumns: isMobile
-                          ? "1fr"
-                          : "repeat(3, minmax(0, 1fr))",
-                      }}
-                    >
-                      <div style={entitlementItemStyle}>
-                        Plan base:{" "}
-                        {entitlements?.can_generate_base_plan ? "Sí" : "No"}
-                      </div>
-                      <div style={entitlementItemStyle}>
-                        Strava: {canConnectStrava ? "Sí" : "No"}
-                      </div>
-                      <div style={entitlementItemStyle}>
-                        Premium: {canUsePremiumPlanning ? "Sí" : "No"}
-                      </div>
-                    </div>
-                  </div>
-
-                  <div
-                    style={{
-                      display: "grid",
-                      gridTemplateColumns: isMobile ? "1fr" : "1.1fr 0.9fr",
-                      gap: 16,
-                    }}
-                  >
-                    <div style={heroCardStyle}>
-                      <div style={heroBadgeStyle}>Sesión del día</div>
-                      <div style={heroTitleStyle}>
-                        {todaysSession
-                          ? todaysSession.title
-                          : "Aún no hay plan cargado"}
-                      </div>
-                      <div style={heroMetaStyle}>
-                        {todaysSession?.day_of_week ||
-                          "Consulta tu plan para comenzar"}
-                        {todaysSession?.distance_target
-                          ? ` · ${todaysSession.distance_target} km`
-                          : ""}
-                        {todaysSession?.duration_target
-                          ? ` · ${todaysSession.duration_target} min`
-                          : ""}
-                      </div>
-                      <div style={heroTextStyle}>
-                        {todaysSession?.objective ||
-                          "Aquí verás la sesión destacada de la semana visible."}
-                      </div>
-                      {todaysSession && (
-                        <button
-                          style={heroButtonStyle}
-                          onClick={() => setSelectedSession(todaysSession)}
-                        >
-                          Ver sesión
-                        </button>
-                      )}
-                    </div>
-
-                    <div style={miniStatsWrapStyle}>
-                      <div style={miniStatCardStyle}>
-                        <div style={miniStatLabelStyle}>Readiness</div>
-                        <div style={miniStatValueStyle}>
-                          {visibleWeeks.length > 0 ? `${readinessScore}%` : "--"}
-                        </div>
-                        <div style={miniStatHintStyle}>Listo para rendir</div>
-                      </div>
-                      <div style={miniStatCardStyle}>
-                        <div style={miniStatLabelStyle}>Recuperación</div>
-                        <div style={miniStatValueStyle}>
-                          {visibleWeeks.length > 0 ? `${recoveryScore}%` : "--"}
-                        </div>
-                        <div style={miniStatHintStyle}>Carga manejable</div>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div style={stravaPlaceholderCardStyle}>
-                    <div style={stravaPlaceholderTitleStyle}>
-                      Integración con Strava
-                    </div>
-                    <div style={stravaPlaceholderTextStyle}>
-                      {canConnectStrava
-                        ? "Tu plan permite conectar Strava. El siguiente bloque será OAuth, sincronización de actividades reales y métricas automáticas."
-                        : "Tu plan actual no incluye Strava. Mejora a Performance o Pro Coach para desbloquear métricas reales."}
-                    </div>
-                    {canConnectStrava ? (
-                      <button style={secondaryButtonStyle} type="button">
-                        Conectar Strava próximamente
-                      </button>
-                    ) : (
-                      <button
-                        style={secondaryButtonStyle}
-                        type="button"
-                        onClick={() => setActiveTab("membership")}
-                      >
-                        Mejorar plan
-                      </button>
-                    )}
-                  </div>
-
-                  {visibleWeek && (
-                    <div style={homeWeekListWrapStyle}>
-                      <div style={homeWeekListHeaderStyle}>
-                        <div style={homeWeekListTitleStyle}>
-                          Semana {visibleWeek.week_number}
-                        </div>
-                        <div style={homeWeekListSubtitleStyle}>
-                          {visibleWeek.focus_label || "Bloque activo"}
-                        </div>
-                      </div>
-
-                      <div
-                        style={{
-                          ...homeWeekListGridStyle,
-                          gridTemplateColumns: isMobile
-                            ? "1fr"
-                            : "repeat(2, minmax(0, 1fr))",
-                        }}
-                      >
-                        {visibleWeek.sessions.map((session, index) => (
-                          <button
-                            key={`${session.day_of_week}-${index}`}
-                            style={homeWeekItemStyle}
-                            onClick={() => setSelectedSession(session)}
-                          >
-                            <div style={homeWeekItemTopStyle}>
-                              <span style={homeWeekDayStyle}>
-                                {session.day_of_week || "Sesión"}
-                              </span>
-                              <span style={homeWeekZoneStyle}>
-                                {session.intensity_zone || "General"}
-                              </span>
-                            </div>
-                            <div style={homeWeekSessionTitleStyle}>
-                              {session.title}
-                            </div>
-                            <div style={homeWeekMetaStyle}>
-                              {session.distance_target
-                                ? `${session.distance_target} km`
-                                : ""}
-                              {session.duration_target
-                                ? ` · ${session.duration_target} min`
-                                : ""}
-                            </div>
-                          </button>
-                        ))}
-                      </div>
-                    </div>
+                      Ver sesión
+                    </button>
                   )}
 
-                  <div
-                    style={{
-                      marginTop: 18,
-                      display: "grid",
-                      gridTemplateColumns: isMobile
-                        ? "1fr"
-                        : "repeat(3, minmax(0, 1fr))",
-                      gap: 12,
-                    }}
-                  >
-                    <div style={summaryCardStyle}>
-                      <div style={summaryLabelStyle}>Semana activa</div>
-                      <div style={summaryValueStyle}>
-                        {visibleWeek
-                          ? `Semana ${visibleWeek.week_number}`
-                          : "--"}
-                      </div>
-                    </div>
-                    <div style={summaryCardStyle}>
-                      <div style={summaryLabelStyle}>Sesiones visibles</div>
-                      <div style={summaryValueStyle}>{totalSessions || "--"}</div>
-                    </div>
-                    <div style={summaryCardStyle}>
-                      <div style={summaryLabelStyle}>Carga total</div>
-                      <div style={summaryValueStyle}>
-                        {totalDistance ? `${totalDistance} km` : "--"}
-                      </div>
-                    </div>
-                  </div>
-                </>
+                  {!todaysSession && (
+                    <button
+                      style={primaryButtonStyle}
+                      onClick={() => setActiveTab("onboarding")}
+                    >
+                      Completar onboarding
+                    </button>
+                  )}
+                </div>
+
+                <div style={highlightCardStyle}>
+                  <span style={badgeDarkStyle}>Métricas reales</span>
+                  <h2 style={highlightTitleStyle}>
+                    {primaryMetrics
+                      ? `${primaryMetrics.totalDistanceKm} km`
+                      : "Conecta Strava"}
+                  </h2>
+                  <p style={textStyle}>
+                    {primaryMetrics
+                      ? `${primaryMetrics.activityCount} actividades · ${formatPace(
+                          primaryMetrics.avgPaceSecondsPerKm
+                        )} · consistencia ${primaryMetrics.consistencyScore}%`
+                      : "Performance y Pro Coach pueden conectar Strava para comenzar a guardar historial real."}
+                  </p>
+
+                  {canConnectStrava && !strava.connected && (
+                    <button
+                      style={secondaryButtonStyle}
+                      disabled={stravaLoading}
+                      onClick={connectStrava}
+                    >
+                      {stravaLoading ? "Conectando..." : "Conectar Strava"}
+                    </button>
+                  )}
+
+                  {canConnectStrava && strava.connected && (
+                    <button
+                      style={secondaryButtonStyle}
+                      disabled={stravaLoading}
+                      onClick={syncStrava}
+                    >
+                      {stravaLoading ? "Sincronizando..." : "Sincronizar Strava"}
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {planCode === "pro_coach" && (
+                <div style={proCoachCardStyle}>
+                  <span style={badgeStyle}>Pro Coach</span>
+                  <h2 style={subTitleStyle}>Seguimiento semanal</h2>
+                  <p style={textStyle}>
+                    Registra cómo te sentiste y recibe una recomendación semanal
+                    basada en reglas mientras activamos la capa de IA.
+                  </p>
+                  <button style={primaryButtonStyle} onClick={saveCheckin}>
+                    Guardar check-in rápido
+                  </button>
+                </div>
               )}
             </section>
           )}
 
-          {authUser && activeTab === "new" && (
-            <section style={{ ...cardStyle, padding: isMobile ? 20 : 32 }}>
-              <div style={sectionHeaderStyle}>
-                <span style={badgeStyle}>Comienza hoy</span>
-                <h2 style={{ ...formTitleStyle, fontSize: isMobile ? 26 : 32 }}>
-                  Completar onboarding
-                </h2>
-                <p style={formTextStyle}>
-                  Captura tu información base para preparar tu estructura de
-                  entrenamiento.
-                </p>
-              </div>
+          {authUser && activeTab === "onboarding" && (
+            <section style={cardStyle}>
+              <span style={badgeStyle}>Onboarding</span>
+              <h1 style={titleStyle}>Configura tu objetivo</h1>
+              <p style={textStyle}>
+                {planCode === "starter"
+                  ? "Starter permite 5K, 10K y 15K. Para 21K o 42K cambia a Performance."
+                  : "Performance y Pro Coach permiten planes hasta 42K."}
+              </p>
 
-              <form onSubmit={handleSubmit} style={formStyle}>
-                <div style={fieldGroupStyle}>
-                  <label style={labelStyle}>Nombre</label>
-                  <input
-                    name="name"
-                    placeholder="Tu nombre"
-                    value={authUser?.name || form.name}
-                    onChange={handleChange}
-                    required
-                    style={inputStyle}
-                    disabled
-                  />
+              <form style={formStyle} onSubmit={handleOnboarding}>
+                <div style={twoColStyle(isMobile)}>
+                  <div>
+                    <label style={labelStyle}>Nombre</label>
+                    <input style={inputStyle} value={authUser.name} disabled />
+                  </div>
+                  <div>
+                    <label style={labelStyle}>Correo</label>
+                    <input style={inputStyle} value={authUser.email} disabled />
+                  </div>
                 </div>
 
-                <div style={fieldGroupStyle}>
-                  <label style={labelStyle}>Correo</label>
-                  <input
-                    name="email"
-                    type="email"
-                    placeholder="tucorreo@email.com"
-                    value={authUser?.email || form.email}
-                    onChange={handleChange}
-                    required
-                    style={inputStyle}
-                    disabled
-                  />
-                </div>
-
-                <div
-                  style={{
-                    ...twoColsStyle,
-                    gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr",
-                  }}
-                >
-                  <div style={fieldGroupStyle}>
+                <div style={twoColStyle(isMobile)}>
+                  <div>
                     <label style={labelStyle}>Objetivo</label>
                     <select
-                      name="goal"
-                      value={form.goal}
-                      onChange={handleChange}
                       style={inputStyle}
+                      value={form.goal}
+                      onChange={(e) =>
+                        setForm((prev) => ({ ...prev, goal: e.target.value }))
+                      }
                     >
                       <option>Completar una carrera</option>
                       <option>Mejorar tiempo</option>
@@ -1443,48 +1167,48 @@ export default function App() {
                     </select>
                   </div>
 
-                  <div style={fieldGroupStyle}>
+                  <div>
                     <label style={labelStyle}>Distancia</label>
                     <select
-                      name="distance"
-                      value={form.distance}
-                      onChange={handleChange}
                       style={inputStyle}
+                      value={form.distance}
+                      onChange={(e) =>
+                        setForm((prev) => ({ ...prev, distance: e.target.value }))
+                      }
                     >
-                      <option>5K</option>
-                      <option>10K</option>
-                      <option>21K</option>
-                      <option>42K</option>
+                      {allowedDistances.map((distance) => (
+                        <option key={distance}>{distance}</option>
+                      ))}
                     </select>
                   </div>
                 </div>
 
-                <div
-                  style={{
-                    ...twoColsStyle,
-                    gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr",
-                  }}
-                >
-                  <div style={fieldGroupStyle}>
+                <div style={twoColStyle(isMobile)}>
+                  <div>
                     <label style={labelStyle}>Días por semana</label>
                     <input
-                      name="daysPerWeek"
-                      type="number"
-                      min={1}
-                      max={7}
-                      value={form.daysPerWeek}
-                      onChange={handleChange}
                       style={inputStyle}
+                      type="number"
+                      min={3}
+                      max={6}
+                      value={form.daysPerWeek}
+                      onChange={(e) =>
+                        setForm((prev) => ({
+                          ...prev,
+                          daysPerWeek: Number(e.target.value),
+                        }))
+                      }
                     />
                   </div>
 
-                  <div style={fieldGroupStyle}>
+                  <div>
                     <label style={labelStyle}>Nivel</label>
                     <select
-                      name="level"
-                      value={form.level}
-                      onChange={handleChange}
                       style={inputStyle}
+                      value={form.level}
+                      onChange={(e) =>
+                        setForm((prev) => ({ ...prev, level: e.target.value }))
+                      }
                     >
                       <option>Principiante</option>
                       <option>Intermedio</option>
@@ -1493,352 +1217,335 @@ export default function App() {
                   </div>
                 </div>
 
-                <div style={fieldGroupStyle}>
-                  <label style={labelStyle}>
-                    Volumen actual por semana (km)
-                  </label>
-                  <input
-                    name="currentVolumeKm"
-                    type="number"
-                    min={0}
-                    value={form.currentVolumeKm}
-                    onChange={handleChange}
-                    style={inputStyle}
-                  />
+                <div style={twoColStyle(isMobile)}>
+                  <div>
+                    <label style={labelStyle}>Volumen semanal actual km</label>
+                    <input
+                      style={inputStyle}
+                      type="number"
+                      min={0}
+                      value={form.currentVolumeKm}
+                      onChange={(e) =>
+                        setForm((prev) => ({
+                          ...prev,
+                          currentVolumeKm: Number(e.target.value),
+                        }))
+                      }
+                    />
+                  </div>
+
+                  <div>
+                    <label style={labelStyle}>Fecha del evento</label>
+                    <input
+                      style={{ ...inputStyle, colorScheme: "dark" }}
+                      type="date"
+                      value={form.eventDate}
+                      onChange={(e) =>
+                        setForm((prev) => ({ ...prev, eventDate: e.target.value }))
+                      }
+                    />
+                  </div>
                 </div>
 
-                <div style={fieldGroupStyle}>
-                  <label style={labelStyle}>Evento objetivo</label>
-                  <input
-                    name="eventName"
-                    placeholder="Ej. Medio Maratón CDMX"
-                    value={form.eventName}
-                    onChange={handleChange}
-                    style={inputStyle}
-                  />
-                </div>
+                <label style={labelStyle}>Nombre del evento</label>
+                <input
+                  style={inputStyle}
+                  value={form.eventName}
+                  onChange={(e) =>
+                    setForm((prev) => ({ ...prev, eventName: e.target.value }))
+                  }
+                  placeholder="Ej. 10K Monterrey, Medio Maratón CDMX..."
+                />
 
-                <div style={fieldGroupStyle}>
-                  <label style={labelStyle}>Fecha del evento</label>
-                  <input
-                    name="eventDate"
-                    type="date"
-                    value={form.eventDate}
-                    onChange={handleChange}
-                    style={{ ...inputStyle, colorScheme: "dark" }}
-                  />
-                </div>
-
-                <button type="submit" disabled={loading} style={buttonStyle}>
-                  {loading
-                    ? "Guardando onboarding..."
-                    : "Guardar onboarding y continuar"}
+                <button style={primaryButtonStyle} disabled={loading}>
+                  {loading ? "Guardando..." : "Guardar y continuar"}
                 </button>
+
+                {hasActiveMembership && (
+                  <button
+                    type="button"
+                    style={secondaryButtonStyle}
+                    disabled={lookupLoading}
+                    onClick={regeneratePlan}
+                  >
+                    {lookupLoading ? "Generando..." : "Generar nuevo plan"}
+                  </button>
+                )}
               </form>
             </section>
           )}
 
-          {authUser && activeTab === "existing" && (
-            <section style={{ ...cardStyle, padding: isMobile ? 20 : 32 }}>
-              <div style={sectionHeaderStyle}>
-                <span style={badgeStyle}>Consultar</span>
-                <h2 style={{ ...formTitleStyle, fontSize: isMobile ? 26 : 32 }}>
-                  Cargar plan existente
-                </h2>
-                <p style={formTextStyle}>
-                  Usa tu correo registrado para consultar acceso y cargar la
-                  semana disponible.
-                </p>
-              </div>
+          {authUser && activeTab === "plan" && (
+            <section style={cardStyle}>
+              <span style={badgeStyle}>Mi plan</span>
+              <h1 style={titleStyle}>Semana actual</h1>
+              <p style={textStyle}>
+                Se muestra la semana visible del plan estándar. Las siguientes semanas quedan listas en tu historial.
+              </p>
 
-              <form onSubmit={handleLookup} style={formStyle}>
-                <div style={fieldGroupStyle}>
-                  <label style={labelStyle}>Correo registrado</label>
-                  <input
-                    type="email"
-                    placeholder="correo registrado"
-                    value={lookupEmail}
-                    onChange={(e) => setLookupEmail(e.target.value)}
-                    required
-                    style={inputStyle}
-                  />
-                </div>
-
-                <button
-                  type="submit"
-                  disabled={lookupLoading}
-                  style={secondaryButtonStyle}
-                >
-                  {lookupLoading
-                    ? "Verificando acceso..."
-                    : "Buscar usuario y cargar plan"}
-                </button>
-              </form>
-
-              {membership && (
-                <div style={membershipStatusCardStyle}>
-                  <div style={membershipStatusTitleStyle}>
-                    Estado de membresía
-                  </div>
-                  <div style={membershipStatusTextStyle}>
-                    Plan: {membership.plan_code || "Sin plan"} · Estado:{" "}
-                    {membership.status}
-                  </div>
+              {!currentWeek && (
+                <div style={emptyStateStyle}>
+                  <h2 style={subTitleStyle}>Aún no hay plan cargado</h2>
+                  <p style={textStyle}>
+                    Completa onboarding y activa tu membresía para generar el plan.
+                  </p>
+                  <button
+                    style={primaryButtonStyle}
+                    onClick={() => setActiveTab("onboarding")}
+                  >
+                    Completar onboarding
+                  </button>
                 </div>
               )}
 
-              {accessGranted && visibleWeeks.length > 0 && (
-                <section style={{ ...planContainerStyle, marginTop: 24 }}>
-                  <div
-                    style={{
-                      ...planTopBarStyle,
-                      alignItems: isMobile ? "start" : "end",
-                      flexDirection: isMobile ? "column" : "row",
-                    }}
-                  >
-                    <h3 style={planTitleStyle}>Tu semana actual</h3>
-                    <div style={planHintStyle}>
-                      Las siguientes semanas permanecen ocultas
+              {currentWeek && (
+                <>
+                  <div style={weekHeaderStyle}>
+                    <div>
+                      <h2 style={subTitleStyle}>Semana {currentWeek.week_number}</h2>
+                      <p style={textStyle}>{currentWeek.focus_label}</p>
                     </div>
+                    <div style={weekKmStyle}>{currentWeek.total_target_distance} km</div>
                   </div>
 
-                  {visibleWeeks.map((week) => (
-                    <div key={week.week_number} style={weekCardStyle}>
-                      <div
-                        style={{
-                          ...weekHeaderStyle,
-                          alignItems: isMobile ? "start" : "center",
-                          flexDirection: isMobile ? "column" : "row",
-                        }}
+                  <div style={sessionListStyle}>
+                    {currentWeek.sessions.map((session, index) => (
+                      <button
+                        key={`${session.id || index}`}
+                        style={sessionItemStyle}
+                        onClick={() => setSelectedSession(session)}
                       >
-                        <div>
-                          <div style={weekLabelStyle}>
-                            Semana {week.week_number}
-                          </div>
-                          <div style={weekFocusStyle}>
-                            {week.focus_label || "Bloque de entrenamiento"}
-                          </div>
+                        <div style={sessionTopStyle}>
+                          <span style={sessionDayStyle}>
+                            {session.day_of_week || "Sesión"}
+                          </span>
+                          <span style={sessionZoneStyle}>
+                            {session.intensity_zone || "General"}
+                          </span>
                         </div>
-                        <div style={weekDistanceStyle}>
-                          {week.total_target_distance ?? 0} km
+                        <div style={sessionTitleStyle}>{session.title}</div>
+                        <div style={sessionMetaStyle}>
+                          {session.distance_target
+                            ? `${session.distance_target} km`
+                            : "Complementario"}
+                          {session.duration_target
+                            ? ` · ${session.duration_target} min`
+                            : ""}
                         </div>
-                      </div>
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
+            </section>
+          )}
 
-                      <div style={sessionsListStyle}>
-                        {week.sessions.map((session, index) => (
-                          <button
-                            key={index}
-                            onClick={() => setSelectedSession(session)}
-                            style={sessionCardButtonStyle}
-                          >
-                            <div style={sessionTopRowStyle}>
-                              <div style={sessionDayStyle}>
-                                {session.day_of_week || "Sesión"}
-                              </div>
-                              <div style={sessionZoneStyle}>
-                                {session.intensity_zone || "General"}
-                              </div>
-                            </div>
+          {authUser && activeTab === "metrics" && (
+            <section style={cardStyle}>
+              <span style={badgeStyle}>Métricas</span>
+              <h1 style={titleStyle}>Progreso real</h1>
+              <p style={textStyle}>
+                Performance y Pro Coach pueden conectar Strava para mostrar métricas reales.
+              </p>
 
-                            <div style={sessionTitleStyle}>{session.title}</div>
+              {!canConnectStrava && (
+                <div style={emptyStateStyle}>
+                  <h2 style={subTitleStyle}>Strava no incluido en Starter</h2>
+                  <p style={textStyle}>
+                    Cambia a Performance para conectar Strava y medir actividades reales.
+                  </p>
+                  <button
+                    style={primaryButtonStyle}
+                    onClick={() => setActiveTab("membership")}
+                  >
+                    Ver planes
+                  </button>
+                </div>
+              )}
 
-                            <div style={sessionMetaStyle}>
-                              {session.distance_target
-                                ? `${session.distance_target} km`
-                                : ""}
-                              {session.duration_target
-                                ? ` · ${session.duration_target} min`
-                                : ""}
-                            </div>
+              {canConnectStrava && !strava.connected && (
+                <div style={emptyStateStyle}>
+                  <h2 style={subTitleStyle}>Conecta Strava</h2>
+                  <p style={textStyle}>
+                    Autoriza tu cuenta para sincronizar actividades y crear historial.
+                  </p>
+                  <button
+                    style={primaryButtonStyle}
+                    disabled={stravaLoading}
+                    onClick={connectStrava}
+                  >
+                    {stravaLoading ? "Conectando..." : "Conectar Strava"}
+                  </button>
+                </div>
+              )}
 
-                            {session.objective && (
-                              <div style={sessionObjectiveStyle}>
-                                {session.objective}
-                              </div>
-                            )}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  ))}
-                </section>
+              {canConnectStrava && strava.connected && (
+                <>
+                  <div style={actionsRowStyle}>
+                    <button
+                      style={primaryButtonStyle}
+                      disabled={stravaLoading}
+                      onClick={syncStrava}
+                    >
+                      {stravaLoading ? "Sincronizando..." : "Sincronizar Strava"}
+                    </button>
+                  </div>
+
+                  <div style={metricGridStyle}>
+                    <MetricCard title="Últimos 7 días" data={metrics?.days7 || null} />
+                    <MetricCard title="Últimos 28 días" data={metrics?.days28 || null} />
+                    <MetricCard title="Últimos 56 días" data={metrics?.days56 || null} />
+                  </div>
+                </>
               )}
             </section>
           )}
 
           {authUser && activeTab === "membership" && (
-            <section style={{ ...cardStyle, padding: isMobile ? 20 : 28 }}>
-              <div style={sectionHeaderStyle}>
-                <span style={badgeStyle}>Membresía</span>
-                <h2 style={{ ...formTitleStyle, fontSize: isMobile ? 26 : 32 }}>
-                  Elige tu plan
-                </h2>
-                <p style={formTextStyle}>
-                  Starter para base, Performance para desbloquear Strava, Pro
-                  Coach para la capa premium.
-                </p>
-              </div>
+            <section style={cardStyle}>
+              <span style={badgeStyle}>Membresía</span>
+              <h1 style={titleStyle}>Elige tu plan</h1>
+              <p style={textStyle}>
+                Starter para comenzar, Performance como plan principal y Pro Coach para seguimiento avanzado.
+              </p>
 
-              {paypalLoading && (
-                <div style={membershipNoteStyle}>Cargando PayPal...</div>
-              )}
-
-              {paypalError && <div style={resultStyle}>{paypalError}</div>}
+              {paypalLoading && <p style={textStyle}>Cargando PayPal...</p>}
+              {paypalError && <div style={alertStyle}>{paypalError}</div>}
 
               <div
                 style={{
-                  display: "grid",
-                  gridTemplateColumns: isMobile
-                    ? "1fr"
-                    : "repeat(3, minmax(0, 1fr))",
-                  gap: 20,
-                  alignItems: "stretch",
+                  ...pricingGridStyle,
+                  gridTemplateColumns: isMobile ? "1fr" : "repeat(3, 1fr)",
                 }}
               >
-                <div style={pricingCardStyle}>
-                  <div style={pricingHeaderBlockStyle}>
-                    <div style={pricingTagStyle}>Base</div>
-                    <h3 style={pricingTitleStyle}>Starter</h3>
-                    <div style={pricingPriceStyle}>$149 MXN</div>
-                    <div style={pricingPeriodStyle}>mensual</div>
-                  </div>
+                <PlanCard
+                  title="Starter"
+                  price="$149 MXN"
+                  tag="Hasta 15K"
+                  features={[
+                    "Planes 5K, 10K y 15K",
+                    "Plan estándar por objetivo",
+                    "Dashboard básico",
+                    "Métricas del plan",
+                    "Sin Strava",
+                  ]}
+                  paypalRef={starterRef}
+                />
 
-                  <div style={pricingListStyle}>
-                    <div style={pricingItemStyle}>
-                      • Plan con perfil declarado
-                    </div>
-                    <div style={pricingItemStyle}>• Ideal para empezar</div>
-                    <div style={pricingItemStyle}>• Sin Strava</div>
-                  </div>
+                <PlanCard
+                  title="Performance"
+                  price="$249 MXN"
+                  tag="Recomendado"
+                  featured
+                  features={[
+                    "Planes 5K a 42K",
+                    "Conexión con Strava",
+                    "Métricas reales",
+                    "Dashboard completo",
+                    "Historial para futura IA",
+                  ]}
+                  paypalRef={performanceRef}
+                />
 
-                  <div style={paypalShellStyle}>
-                    <div ref={starterRef} style={paypalButtonWrapStyle} />
+                <PlanCard
+                  title="Pro Coach"
+                  price="$449 MXN"
+                  tag="Premium"
+                  features={[
+                    "Todo Performance",
+                    "Check-in semanal",
+                    "Recomendación semanal",
+                    "Fuerza y movilidad",
+                    "Acceso prioritario a IA",
+                  ]}
+                  paypalRef={proRef}
+                />
+              </div>
+            </section>
+          )}
+
+          {authUser && activeTab === "profile" && (
+            <section style={cardStyle}>
+              <span style={badgeStyle}>Perfil</span>
+              <h1 style={titleStyle}>Cuenta y acceso</h1>
+
+              <div style={profileDetailsGridStyle}>
+                <div style={statCardStyle}>
+                  <div style={statLabelStyle}>Nombre</div>
+                  <div style={statValueSmallStyle}>{authUser.name}</div>
+                </div>
+
+                <div style={statCardStyle}>
+                  <div style={statLabelStyle}>Correo</div>
+                  <div style={statValueSmallStyle}>{authUser.email}</div>
+                </div>
+
+                <div style={statCardStyle}>
+                  <div style={statLabelStyle}>Plan</div>
+                  <div style={statValueSmallStyle}>{getPlanLabel(planCode)}</div>
+                </div>
+
+                <div style={statCardStyle}>
+                  <div style={statLabelStyle}>Estado</div>
+                  <div style={statValueSmallStyle}>{getStatusLabel(membership?.status)}</div>
+                </div>
+
+                <div style={statCardStyle}>
+                  <div style={statLabelStyle}>Strava</div>
+                  <div style={statValueSmallStyle}>
+                    {strava.connected ? "Conectado" : "No conectado"}
                   </div>
                 </div>
 
-                <div style={{ ...pricingCardStyle, ...pricingFeaturedStyle }}>
-                  <div style={pricingHeaderBlockStyle}>
-                    <div style={pricingTagStyle}>Recomendado</div>
-                    <h3 style={pricingTitleStyle}>Performance</h3>
-                    <div style={pricingPriceStyle}>$249 MXN</div>
-                    <div style={pricingPeriodStyle}>mensual</div>
-                  </div>
-
-                  <div style={pricingListStyle}>
-                    <div style={pricingItemStyle}>• Perfil + historial real</div>
-                    <div style={pricingItemStyle}>• Conexión con Strava</div>
-                    <div style={pricingItemStyle}>
-                      • Mejor base para 10K / 21K / 42K
-                    </div>
-                  </div>
-
-                  <div style={paypalShellStyle}>
-                    <div ref={performanceRef} style={paypalButtonWrapStyle} />
-                  </div>
-                </div>
-
-                <div style={pricingCardStyle}>
-                  <div style={pricingHeaderBlockStyle}>
-                    <div style={pricingTagStyle}>Premium</div>
-                    <h3 style={pricingTitleStyle}>Pro Coach</h3>
-                    <div style={pricingPriceStyle}>$449 MXN</div>
-                    <div style={pricingPeriodStyle}>mensual</div>
-                  </div>
-
-                  <div style={pricingListStyle}>
-                    <div style={pricingItemStyle}>• Strava + capa premium</div>
-                    <div style={pricingItemStyle}>• Mejor refinamiento</div>
-                    <div style={pricingItemStyle}>
-                      • Base para planificación avanzada
-                    </div>
-                  </div>
-
-                  <div style={paypalShellStyle}>
-                    <div ref={proRef} style={paypalButtonWrapStyle} />
+                <div style={statCardStyle}>
+                  <div style={statLabelStyle}>Premium</div>
+                  <div style={statValueSmallStyle}>
+                    {canUsePremiumPlanning ? "Activo" : "No activo"}
                   </div>
                 </div>
               </div>
             </section>
           )}
 
-          {result && <div style={resultStyle}>{result}</div>}
+          {result && <div style={alertStyle}>{result}</div>}
         </main>
       </div>
 
       {selectedSession && (
         <div style={modalOverlayStyle} onClick={() => setSelectedSession(null)}>
-          <div
-            style={{
-              ...modalCardStyle,
-              maxWidth: isMobile ? "100%" : 640,
-              padding: isMobile ? 18 : 24,
-            }}
-            onClick={(e) => e.stopPropagation()}
-          >
+          <div style={modalStyle} onClick={(e) => e.stopPropagation()}>
             <div style={modalHeaderStyle}>
               <div>
-                <div style={modalEyebrowStyle}>
-                  {selectedSession.day_of_week || "Sesión"}
-                </div>
-                <h3 style={{ ...modalTitleStyle, fontSize: isMobile ? 24 : 28 }}>
-                  {selectedSession.title}
-                </h3>
+                <div style={badgeStyle}>{selectedSession.day_of_week || "Sesión"}</div>
+                <h2 style={subTitleStyle}>{selectedSession.title}</h2>
               </div>
-              <button
-                onClick={() => setSelectedSession(null)}
-                style={closeButtonStyle}
-              >
+              <button style={closeButtonStyle} onClick={() => setSelectedSession(null)}>
                 ✕
               </button>
             </div>
 
-            <div style={modalMetaStyle}>
+            <p style={textStyle}>
               {selectedSession.distance_target
                 ? `${selectedSession.distance_target} km`
-                : "Sin distancia"}
+                : "Complementario"}
               {selectedSession.duration_target
                 ? ` · ${selectedSession.duration_target} min`
                 : ""}
               {selectedSession.intensity_zone
                 ? ` · ${selectedSession.intensity_zone}`
                 : ""}
-            </div>
+            </p>
 
-            {selectedSession.objective && (
-              <div style={detailBlockStyle}>
-                <div style={detailTitleStyle}>Objetivo</div>
-                <div style={detailTextStyle}>{selectedSession.objective}</div>
-              </div>
-            )}
-
-            {selectedSession.warmup_text && (
-              <div style={detailBlockStyle}>
-                <div style={detailTitleStyle}>Calentamiento</div>
-                <div style={detailTextStyle}>{selectedSession.warmup_text}</div>
-              </div>
-            )}
-
-            {selectedSession.main_set_text && (
-              <div style={detailBlockStyle}>
-                <div style={detailTitleStyle}>Bloque principal</div>
-                <div style={detailTextStyle}>{selectedSession.main_set_text}</div>
-              </div>
-            )}
-
-            {selectedSession.cooldown_text && (
-              <div style={detailBlockStyle}>
-                <div style={detailTitleStyle}>Enfriamiento</div>
-                <div style={detailTextStyle}>{selectedSession.cooldown_text}</div>
-              </div>
-            )}
+            <Detail title="Objetivo" text={selectedSession.objective} />
+            <Detail title="Calentamiento" text={selectedSession.warmup_text} />
+            <Detail title="Bloque principal" text={selectedSession.main_set_text} />
+            <Detail title="Enfriamiento" text={selectedSession.cooldown_text} />
 
             {typeof selectedSession.estimated_load === "number" && (
-              <div style={detailBlockStyle}>
-                <div style={detailTitleStyle}>Carga estimada</div>
-                <div style={detailTextStyle}>
-                  {selectedSession.estimated_load}
-                </div>
-              </div>
+              <Detail
+                title="Carga estimada"
+                text={String(selectedSession.estimated_load)}
+              />
             )}
           </div>
         </div>
@@ -1847,264 +1554,292 @@ export default function App() {
   );
 }
 
-const loadingScreenStyle: React.CSSProperties = {
+function MetricCard({
+  title,
+  data,
+}: {
+  title: string;
+  data: MetricsWindow | null;
+}) {
+  return (
+    <div style={statCardStyle}>
+      <div style={statLabelStyle}>{title}</div>
+      <div style={statValueStyle}>{data ? `${data.totalDistanceKm} km` : "--"}</div>
+      <div style={statHintStyle}>
+        {data
+          ? `${data.activityCount} actividades · ${formatTime(
+              data.totalMovingTimeSeconds
+            )}`
+          : "Sin datos"}
+      </div>
+      <div style={metricMiniGridStyle}>
+        <span>Ritmo: {data ? formatPace(data.avgPaceSecondsPerKm) : "--"}</span>
+        <span>Tirada: {data ? `${data.longRunKm} km` : "--"}</span>
+        <span>Activo: {data ? `${data.daysActive} días` : "--"}</span>
+        <span>Consistencia: {data ? `${data.consistencyScore}%` : "--"}</span>
+      </div>
+    </div>
+  );
+}
+
+function PlanCard({
+  title,
+  price,
+  tag,
+  features,
+  paypalRef,
+  featured,
+}: {
+  title: string;
+  price: string;
+  tag: string;
+  features: string[];
+  paypalRef: React.RefObject<HTMLDivElement | null>;
+  featured?: boolean;
+}) {
+  return (
+    <div style={{ ...pricingCardStyle, ...(featured ? pricingFeaturedStyle : {}) }}>
+      <div style={pricingTagStyle}>{tag}</div>
+      <h2 style={subTitleStyle}>{title}</h2>
+      <div style={priceStyle}>{price}</div>
+      <div style={pricePeriodStyle}>mensual</div>
+
+      <div style={featureListStyle}>
+        {features.map((feature) => (
+          <div key={feature} style={featureItemStyle}>
+            • {feature}
+          </div>
+        ))}
+      </div>
+
+      <div style={paypalContainerStyle}>
+        <div ref={paypalRef} style={paypalButtonWrapStyle} />
+      </div>
+    </div>
+  );
+}
+
+function Detail({ title, text }: { title: string; text?: string | null }) {
+  if (!text) return null;
+
+  return (
+    <div style={detailBoxStyle}>
+      <div style={detailTitleStyle}>{title}</div>
+      <div style={detailTextStyle}>{text}</div>
+    </div>
+  );
+}
+
+const loadingPageStyle: React.CSSProperties = {
   minHeight: "100vh",
+  background: "#070B10",
   display: "flex",
   alignItems: "center",
   justifyContent: "center",
-  background:
-    "linear-gradient(180deg, #070B10 0%, #0B0F14 100%)",
-  padding: 20,
+  color: "#fff",
+  padding: 24,
 };
 
 const loadingCardStyle: React.CSSProperties = {
   borderRadius: 24,
-  padding: 28,
+  background: "rgba(255,255,255,0.04)",
   border: "1px solid rgba(255,255,255,0.08)",
-  background: "rgba(255,255,255,0.03)",
+  padding: 28,
   textAlign: "center",
-  color: "white",
 };
 
 const pageStyle: React.CSSProperties = {
   minHeight: "100vh",
   background:
-    "radial-gradient(circle at top left, rgba(0,230,255,0.10), transparent 25%), radial-gradient(circle at top right, rgba(214,255,77,0.14), transparent 20%), linear-gradient(180deg, #070B10 0%, #0B0F14 100%)",
-  color: "white",
+    "radial-gradient(circle at top left, rgba(0,230,255,0.13), transparent 28%), radial-gradient(circle at top right, rgba(214,255,77,0.14), transparent 28%), linear-gradient(180deg, #070B10 0%, #0B0F14 100%)",
+  color: "#fff",
   fontFamily:
     "Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
-  padding: "32px 20px",
+  padding: 20,
   position: "relative",
-  overflow: "hidden",
+  overflowX: "hidden",
 };
 
-const gridOverlayStyle: React.CSSProperties = {
-  position: "absolute",
-  inset: 0,
-  backgroundImage:
-    "linear-gradient(rgba(255,255,255,0.035) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.03) 1px, transparent 1px)",
-  backgroundSize: "34px 34px",
-  opacity: 0.18,
+const backgroundGlowOneStyle: React.CSSProperties = {
+  position: "fixed",
+  width: 360,
+  height: 360,
+  borderRadius: "50%",
+  background: "rgba(214,255,77,0.09)",
+  filter: "blur(90px)",
+  top: -80,
+  right: -80,
   pointerEvents: "none",
 };
 
-const glowOne: React.CSSProperties = {
-  position: "absolute",
-  width: 300,
-  height: 300,
+const backgroundGlowTwoStyle: React.CSSProperties = {
+  position: "fixed",
+  width: 360,
+  height: 360,
   borderRadius: "50%",
-  background: "rgba(214,255,77,0.10)",
-  filter: "blur(80px)",
-  top: -40,
-  right: -60,
+  background: "rgba(0,230,255,0.09)",
+  filter: "blur(90px)",
+  bottom: -80,
+  left: -80,
+  pointerEvents: "none",
 };
 
-const glowTwo: React.CSSProperties = {
-  position: "absolute",
-  width: 300,
-  height: 300,
-  borderRadius: "50%",
-  background: "rgba(0,230,255,0.10)",
-  filter: "blur(80px)",
-  bottom: -60,
-  left: -60,
-};
-
-const glowThree: React.CSSProperties = {
-  position: "absolute",
-  width: 260,
-  height: 260,
-  borderRadius: "50%",
-  background: "rgba(0,230,255,0.06)",
-  filter: "blur(70px)",
-  top: "34%",
-  left: "40%",
-};
-
-const wrapperStyle: React.CSSProperties = {
-  maxWidth: 1280,
+const appShellStyle: React.CSSProperties = {
+  width: "100%",
+  maxWidth: 1320,
   margin: "0 auto",
   display: "grid",
-  gap: 28,
+  gap: 20,
   position: "relative",
   zIndex: 1,
-  alignItems: "start",
 };
 
-const brandPanelStyle: React.CSSProperties = {
-  background:
-    "linear-gradient(180deg, rgba(255,255,255,0.05), rgba(255,255,255,0.02))",
-  border: "1px solid rgba(255,255,255,0.08)",
-  borderRadius: 32,
-  padding: 36,
+const sideBarStyle: React.CSSProperties = {
+  background: "rgba(255,255,255,0.045)",
+  border: "1px solid rgba(255,255,255,0.09)",
+  borderRadius: 30,
+  padding: 22,
+  minHeight: 760,
   display: "flex",
   flexDirection: "column",
   justifyContent: "space-between",
-  boxShadow: "0 24px 80px rgba(0,0,0,0.42)",
-  backdropFilter: "blur(12px)",
+  backdropFilter: "blur(14px)",
+  boxShadow: "0 24px 70px rgba(0,0,0,0.28)",
 };
 
-const logoRowStyle: React.CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  gap: 12,
-  flexWrap: "wrap",
+const mainStyle: React.CSSProperties = {
+  display: "grid",
+  gap: 18,
+  alignContent: "start",
 };
 
-const logoBoxStyle: React.CSSProperties = {
+const logoStyle: React.CSSProperties = {
   display: "inline-flex",
+  width: "fit-content",
   alignItems: "center",
   justifyContent: "center",
   padding: "12px 18px",
   borderRadius: 18,
-  background: "rgba(214,255,77,0.10)",
+  background: "rgba(214,255,77,0.11)",
   color: "#D6FF4D",
-  fontWeight: 800,
+  fontWeight: 900,
   letterSpacing: "0.04em",
-  width: "fit-content",
-  border: "1px solid rgba(214,255,77,0.20)",
-  boxShadow: "0 0 30px rgba(214,255,77,0.08)",
+  border: "1px solid rgba(214,255,77,0.18)",
 };
 
-const chipStyle: React.CSSProperties = {
-  display: "inline-flex",
-  padding: "8px 12px",
-  borderRadius: 999,
-  background: "rgba(0,230,255,0.10)",
+const smallCapsStyle: React.CSSProperties = {
   color: "#00E6FF",
   fontSize: 12,
-  fontWeight: 700,
-  border: "1px solid rgba(0,230,255,0.18)",
-};
-
-const eyebrowStyle: React.CSSProperties = {
-  marginTop: 28,
-  marginBottom: 12,
-  color: "#00E6FF",
-  fontSize: 12,
-  letterSpacing: "0.22em",
-  fontWeight: 700,
-};
-
-const titleStyle: React.CSSProperties = {
-  lineHeight: 1.02,
-  margin: 0,
-};
-
-const subtitleStyle: React.CSSProperties = {
-  marginTop: 18,
-  color: "rgba(255,255,255,0.68)",
-  lineHeight: 1.7,
-};
-
-const featureGridStyle: React.CSSProperties = {
-  display: "grid",
-  gap: 14,
-  marginTop: 32,
-};
-
-const featureCardStyle: React.CSSProperties = {
-  borderRadius: 20,
-  border: "1px solid rgba(255,255,255,0.08)",
-  background: "rgba(255,255,255,0.03)",
-  padding: 16,
-  boxShadow: "inset 0 1px 0 rgba(255,255,255,0.03)",
-};
-
-const featureLabelStyle: React.CSSProperties = {
-  display: "block",
-  color: "rgba(255,255,255,0.55)",
-  fontSize: 12,
-  marginBottom: 6,
-};
-
-const featureValueStyle: React.CSSProperties = {
-  fontSize: 16,
-  color: "#fff",
-};
-
-const statsRowStyle: React.CSSProperties = {
-  display: "grid",
-  gap: 12,
-  marginTop: 28,
-};
-
-const statCardStyle: React.CSSProperties = {
-  borderRadius: 18,
-  padding: 16,
-  border: "1px solid rgba(255,255,255,0.08)",
-  background: "rgba(255,255,255,0.025)",
-};
-
-const statValueStyle: React.CSSProperties = {
-  fontSize: 20,
+  letterSpacing: "0.16em",
   fontWeight: 800,
-  color: "#D6FF4D",
+  marginTop: 12,
 };
 
-const statLabelStyle: React.CSSProperties = {
-  marginTop: 6,
-  fontSize: 13,
-  color: "rgba(255,255,255,0.62)",
-};
-
-const mainPanelStyle: React.CSSProperties = {
-  display: "grid",
-  gap: 20,
-};
-
-const tabsWrapStyle: React.CSSProperties = {
-  gap: 10,
-  alignItems: "center",
+const profileBoxStyle: React.CSSProperties = {
+  marginTop: 24,
+  borderRadius: 22,
+  padding: 16,
   background: "rgba(255,255,255,0.04)",
   border: "1px solid rgba(255,255,255,0.08)",
-  borderRadius: 18,
-  padding: 8,
 };
 
-const tabButtonStyle: React.CSSProperties = {
-  border: "none",
-  background: "transparent",
-  color: "rgba(255,255,255,0.65)",
-  padding: "12px 18px",
-  borderRadius: 12,
-  fontWeight: 700,
+const profileNameStyle: React.CSSProperties = {
+  fontSize: 18,
+  fontWeight: 900,
+};
+
+const profileEmailStyle: React.CSSProperties = {
+  marginTop: 4,
+  fontSize: 13,
+  color: "rgba(255,255,255,0.62)",
+  wordBreak: "break-word",
+};
+
+const planPillStyle: React.CSSProperties = {
+  display: "inline-flex",
+  marginTop: 12,
+  borderRadius: 999,
+  padding: "8px 12px",
+  background: "rgba(0,230,255,0.1)",
+  color: "#00E6FF",
+  fontSize: 12,
+  fontWeight: 800,
+};
+
+const navStyle: React.CSSProperties = {
+  display: "grid",
+  gap: 8,
+  marginTop: 22,
+};
+
+const navButtonStyle = (active: boolean): React.CSSProperties => ({
+  width: "100%",
+  border: "1px solid rgba(255,255,255,0.08)",
+  background: active ? "rgba(214,255,77,0.12)" : "rgba(255,255,255,0.03)",
+  color: active ? "#D6FF4D" : "rgba(255,255,255,0.74)",
+  borderRadius: 16,
+  padding: "13px 14px",
+  fontWeight: 800,
+  textAlign: "left",
   cursor: "pointer",
-};
+});
 
-const activeTabButtonStyle: React.CSSProperties = {
-  background: "rgba(214,255,77,0.12)",
-  color: "#D6FF4D",
+const logoutButtonStyle: React.CSSProperties = {
+  border: "1px solid rgba(255,255,255,0.10)",
+  background: "rgba(255,255,255,0.05)",
+  color: "#fff",
+  borderRadius: 16,
+  padding: "13px 14px",
+  fontWeight: 800,
+  cursor: "pointer",
 };
 
 const cardStyle: React.CSSProperties = {
   background:
     "linear-gradient(180deg, rgba(17,22,29,0.98), rgba(11,15,20,0.96))",
   border: "1px solid rgba(255,255,255,0.08)",
-  borderRadius: 32,
-  boxShadow: "0 24px 80px rgba(0,0,0,0.42)",
-  backdropFilter: "blur(12px)",
+  borderRadius: 30,
+  padding: 26,
+  boxShadow: "0 24px 70px rgba(0,0,0,0.34)",
 };
 
 const badgeStyle: React.CSSProperties = {
-  display: "inline-block",
+  display: "inline-flex",
+  width: "fit-content",
+  borderRadius: 999,
+  padding: "8px 12px",
   background: "rgba(0,230,255,0.10)",
   color: "#00E6FF",
-  padding: "8px 12px",
-  borderRadius: 999,
   fontSize: 12,
-  fontWeight: 700,
-  marginBottom: 14,
+  fontWeight: 900,
 };
 
-const formTitleStyle: React.CSSProperties = {
-  margin: 0,
+const badgeDarkStyle: React.CSSProperties = {
+  ...badgeStyle,
+  background: "rgba(255,255,255,0.08)",
+  color: "#D6FF4D",
 };
 
-const formTextStyle: React.CSSProperties = {
-  marginTop: 10,
-  color: "rgba(255,255,255,0.65)",
+const titleStyle: React.CSSProperties = {
+  fontSize: 36,
+  lineHeight: 1.05,
+  margin: "14px 0 0 0",
+};
+
+const subTitleStyle: React.CSSProperties = {
+  fontSize: 24,
+  lineHeight: 1.15,
+  margin: "12px 0 0 0",
+};
+
+const textStyle: React.CSSProperties = {
+  color: "rgba(255,255,255,0.68)",
   lineHeight: 1.6,
+  marginTop: 10,
+};
+
+const mutedTextStyle: React.CSSProperties = {
+  color: "rgba(255,255,255,0.68)",
 };
 
 const sectionHeaderStyle: React.CSSProperties = {
@@ -2113,450 +1848,279 @@ const sectionHeaderStyle: React.CSSProperties = {
 
 const formStyle: React.CSSProperties = {
   display: "grid",
-  gap: 14,
-};
-
-const twoColsStyle: React.CSSProperties = {
-  display: "grid",
-  gap: 12,
-};
-
-const fieldGroupStyle: React.CSSProperties = {
-  display: "flex",
-  flexDirection: "column",
-  gap: 8,
+  gap: 13,
+  marginTop: 22,
 };
 
 const labelStyle: React.CSSProperties = {
+  color: "rgba(255,255,255,0.74)",
   fontSize: 13,
-  color: "rgba(255,255,255,0.72)",
-  fontWeight: 600,
+  fontWeight: 800,
+  display: "block",
+  marginBottom: 8,
 };
 
 const inputStyle: React.CSSProperties = {
   width: "100%",
-  padding: "14px 14px",
+  boxSizing: "border-box",
   borderRadius: 16,
   border: "1px solid rgba(255,255,255,0.08)",
   background: "#0B0F14",
-  color: "white",
-  boxSizing: "border-box",
+  color: "#fff",
+  padding: "14px 14px",
   outline: "none",
-  boxShadow: "inset 0 1px 0 rgba(255,255,255,0.03)",
 };
 
-const buttonStyle: React.CSSProperties = {
-  background: "#D6FF4D",
-  color: "#000",
+const twoColStyle = (isMobile: boolean): React.CSSProperties => ({
+  display: "grid",
+  gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr",
+  gap: 13,
+});
+
+const primaryButtonStyle: React.CSSProperties = {
   border: "none",
   borderRadius: 16,
-  padding: "15px 16px",
-  fontWeight: 800,
+  background: "#D6FF4D",
+  color: "#050505",
+  padding: "14px 16px",
+  fontWeight: 900,
   cursor: "pointer",
-  marginTop: 8,
-  boxShadow: "0 12px 30px rgba(214,255,77,0.18)",
+  width: "fit-content",
+  minWidth: 170,
 };
 
 const secondaryButtonStyle: React.CSSProperties = {
-  background: "rgba(0,230,255,0.14)",
-  color: "#00E6FF",
-  border: "1px solid rgba(0,230,255,0.20)",
+  border: "1px solid rgba(0,230,255,0.2)",
   borderRadius: 16,
-  padding: "15px 16px",
-  fontWeight: 800,
+  background: "rgba(0,230,255,0.12)",
+  color: "#00E6FF",
+  padding: "14px 16px",
+  fontWeight: 900,
   cursor: "pointer",
+  width: "fit-content",
+  minWidth: 170,
+};
+
+const alertStyle: React.CSSProperties = {
+  borderRadius: 18,
+  border: "1px solid rgba(0,230,255,0.18)",
+  background: "rgba(0,230,255,0.08)",
+  color: "#00E6FF",
+  padding: 16,
+  lineHeight: 1.5,
+};
+
+const metricGridStyle: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
+  gap: 14,
+  marginTop: 20,
+};
+
+const statCardStyle: React.CSSProperties = {
+  borderRadius: 22,
+  padding: 18,
+  background: "rgba(255,255,255,0.04)",
+  border: "1px solid rgba(255,255,255,0.08)",
+};
+
+const statLabelStyle: React.CSSProperties = {
+  color: "rgba(255,255,255,0.55)",
+  fontSize: 12,
+  fontWeight: 800,
+};
+
+const statValueStyle: React.CSSProperties = {
+  color: "#D6FF4D",
+  fontSize: 30,
+  fontWeight: 950,
   marginTop: 8,
 };
 
-const resultStyle: React.CSSProperties = {
-  padding: "14px 16px",
-  borderRadius: 16,
-  background: "rgba(255,255,255,0.05)",
-  color: "#00E6FF",
-  lineHeight: 1.5,
-  wordBreak: "break-word",
-  border: "1px solid rgba(255,255,255,0.06)",
-};
-
-const profileTopBarStyle: React.CSSProperties = {
-  display: "flex",
-  justifyContent: "space-between",
-  alignItems: "center",
-  gap: 12,
-  marginBottom: 18,
-  flexWrap: "wrap",
-};
-
-const profileNameStyle: React.CSSProperties = {
-  fontSize: 22,
-  fontWeight: 800,
-};
-
-const profileEmailStyle: React.CSSProperties = {
-  fontSize: 14,
-  color: "rgba(255,255,255,0.65)",
-  marginTop: 4,
-};
-
-const logoutButtonStyle: React.CSSProperties = {
-  background: "rgba(255,255,255,0.06)",
+const statValueSmallStyle: React.CSSProperties = {
   color: "#fff",
-  border: "1px solid rgba(255,255,255,0.10)",
-  borderRadius: 14,
-  padding: "12px 14px",
-  fontWeight: 700,
-  cursor: "pointer",
+  fontSize: 18,
+  fontWeight: 850,
+  marginTop: 8,
+  wordBreak: "break-word",
 };
 
-const heroCardStyle: React.CSSProperties = {
-  borderRadius: 24,
+const statHintStyle: React.CSSProperties = {
+  color: "rgba(255,255,255,0.68)",
+  fontSize: 13,
+  marginTop: 6,
+};
+
+const splitGridStyle: React.CSSProperties = {
+  display: "grid",
+  gap: 16,
+  marginTop: 18,
+};
+
+const highlightCardStyle: React.CSSProperties = {
+  borderRadius: 26,
   padding: 22,
   background:
-    "linear-gradient(135deg, rgba(214,255,77,0.14), rgba(0,230,255,0.10) 60%, rgba(255,255,255,0.03))",
+    "linear-gradient(135deg, rgba(214,255,77,0.12), rgba(0,230,255,0.08), rgba(255,255,255,0.03))",
   border: "1px solid rgba(255,255,255,0.08)",
-  minHeight: 220,
-  display: "flex",
-  flexDirection: "column",
-  justifyContent: "space-between",
 };
 
-const heroBadgeStyle: React.CSSProperties = {
-  display: "inline-block",
-  width: "fit-content",
-  padding: "8px 12px",
-  borderRadius: 999,
-  fontSize: 12,
-  fontWeight: 700,
-  background: "rgba(255,255,255,0.08)",
-  color: "#D6FF4D",
-};
-
-const heroTitleStyle: React.CSSProperties = {
+const highlightTitleStyle: React.CSSProperties = {
   fontSize: 30,
-  fontWeight: 800,
-  lineHeight: 1.05,
-  marginTop: 16,
+  lineHeight: 1.08,
+  margin: "16px 0 0 0",
 };
 
-const heroMetaStyle: React.CSSProperties = {
-  marginTop: 8,
-  color: "rgba(255,255,255,0.72)",
-  fontSize: 14,
-};
-
-const heroTextStyle: React.CSSProperties = {
-  marginTop: 12,
-  color: "rgba(255,255,255,0.88)",
-  lineHeight: 1.6,
-};
-
-const heroButtonStyle: React.CSSProperties = {
+const proCoachCardStyle: React.CSSProperties = {
   marginTop: 18,
-  background: "#D6FF4D",
-  color: "#000",
-  border: "none",
-  borderRadius: 14,
-  padding: "12px 14px",
-  fontWeight: 800,
-  cursor: "pointer",
-  width: "fit-content",
+  borderRadius: 26,
+  padding: 22,
+  background: "rgba(214,255,77,0.08)",
+  border: "1px solid rgba(214,255,77,0.14)",
 };
 
-const miniStatsWrapStyle: React.CSSProperties = {
-  display: "grid",
-  gap: 12,
-};
-
-const miniStatCardStyle: React.CSSProperties = {
-  borderRadius: 20,
-  padding: 18,
+const emptyStateStyle: React.CSSProperties = {
+  borderRadius: 24,
+  padding: 22,
+  background: "rgba(255,255,255,0.035)",
   border: "1px solid rgba(255,255,255,0.08)",
-  background: "rgba(255,255,255,0.03)",
-};
-
-const miniStatLabelStyle: React.CSSProperties = {
-  fontSize: 12,
-  color: "rgba(255,255,255,0.55)",
-};
-
-const miniStatValueStyle: React.CSSProperties = {
-  fontSize: 34,
-  fontWeight: 800,
-  color: "#D6FF4D",
-  marginTop: 8,
-};
-
-const miniStatHintStyle: React.CSSProperties = {
-  marginTop: 4,
-  fontSize: 13,
-  color: "rgba(255,255,255,0.72)",
-};
-
-const homeWeekListWrapStyle: React.CSSProperties = {
-  marginTop: 18,
-  borderRadius: 22,
-  padding: 18,
-  border: "1px solid rgba(255,255,255,0.08)",
-  background: "rgba(255,255,255,0.03)",
-};
-
-const homeWeekListHeaderStyle: React.CSSProperties = {
-  marginBottom: 14,
-};
-
-const homeWeekListTitleStyle: React.CSSProperties = {
-  fontSize: 20,
-  fontWeight: 800,
-  color: "#D6FF4D",
-};
-
-const homeWeekListSubtitleStyle: React.CSSProperties = {
-  marginTop: 4,
-  color: "rgba(255,255,255,0.66)",
-  fontSize: 13,
-};
-
-const homeWeekListGridStyle: React.CSSProperties = {
-  display: "grid",
-  gap: 10,
-};
-
-const homeWeekItemStyle: React.CSSProperties = {
-  borderRadius: 16,
-  background: "#0B0F14",
-  border: "1px solid rgba(255,255,255,0.06)",
-  padding: 14,
-  textAlign: "left",
-  cursor: "pointer",
-  color: "white",
-};
-
-const homeWeekItemTopStyle: React.CSSProperties = {
-  display: "flex",
-  justifyContent: "space-between",
-  gap: 10,
-  marginBottom: 6,
-  alignItems: "center",
-};
-
-const homeWeekDayStyle: React.CSSProperties = {
-  fontSize: 12,
-  color: "#D6FF4D",
-  fontWeight: 700,
-};
-
-const homeWeekZoneStyle: React.CSSProperties = {
-  fontSize: 12,
-  color: "#00E6FF",
-  fontWeight: 700,
-};
-
-const homeWeekSessionTitleStyle: React.CSSProperties = {
-  fontSize: 15,
-  fontWeight: 700,
-};
-
-const homeWeekMetaStyle: React.CSSProperties = {
-  marginTop: 6,
-  fontSize: 13,
-  color: "rgba(255,255,255,0.65)",
-};
-
-const summaryCardStyle: React.CSSProperties = {
-  borderRadius: 18,
-  padding: 16,
-  border: "1px solid rgba(255,255,255,0.08)",
-  background: "rgba(255,255,255,0.03)",
-};
-
-const summaryLabelStyle: React.CSSProperties = {
-  fontSize: 12,
-  color: "rgba(255,255,255,0.55)",
-};
-
-const summaryValueStyle: React.CSSProperties = {
-  marginTop: 8,
-  fontSize: 24,
-  fontWeight: 800,
-  color: "#fff",
-};
-
-const planContainerStyle: React.CSSProperties = {
-  display: "grid",
-  gap: 16,
-};
-
-const planTopBarStyle: React.CSSProperties = {
-  display: "flex",
-  gap: 16,
-  flexWrap: "wrap",
-};
-
-const planTitleStyle: React.CSSProperties = {
-  margin: 0,
-  fontSize: 24,
-  color: "#D6FF4D",
-};
-
-const planHintStyle: React.CSSProperties = {
-  color: "rgba(255,255,255,0.55)",
-  fontSize: 13,
-};
-
-const weekCardStyle: React.CSSProperties = {
-  borderRadius: 22,
-  border: "1px solid rgba(255,255,255,0.08)",
-  background: "rgba(255,255,255,0.03)",
-  padding: 18,
-  boxShadow: "inset 0 1px 0 rgba(255,255,255,0.03)",
+  marginTop: 20,
 };
 
 const weekHeaderStyle: React.CSSProperties = {
-  display: "flex",
-  gap: 12,
-  marginBottom: 14,
-};
-
-const weekLabelStyle: React.CSSProperties = {
-  fontSize: 13,
-  color: "rgba(255,255,255,0.55)",
-};
-
-const weekFocusStyle: React.CSSProperties = {
-  fontSize: 18,
-  fontWeight: 700,
-};
-
-const weekDistanceStyle: React.CSSProperties = {
-  color: "#00E6FF",
-  fontWeight: 700,
-};
-
-const sessionsListStyle: React.CSSProperties = {
-  display: "grid",
-  gap: 10,
-};
-
-const sessionCardButtonStyle: React.CSSProperties = {
-  borderRadius: 16,
-  background: "#0B0F14",
-  border: "1px solid rgba(255,255,255,0.06)",
-  padding: 14,
-  textAlign: "left",
-  cursor: "pointer",
-  color: "white",
-};
-
-const sessionTopRowStyle: React.CSSProperties = {
+  marginTop: 20,
   display: "flex",
   justifyContent: "space-between",
   alignItems: "center",
+  gap: 14,
+  flexWrap: "wrap",
+};
+
+const weekKmStyle: React.CSSProperties = {
+  fontSize: 30,
+  fontWeight: 950,
+  color: "#D6FF4D",
+};
+
+const sessionListStyle: React.CSSProperties = {
+  display: "grid",
+  gap: 12,
+  marginTop: 18,
+};
+
+const sessionItemStyle: React.CSSProperties = {
+  border: "1px solid rgba(255,255,255,0.08)",
+  background: "#0B0F14",
+  color: "#fff",
+  borderRadius: 18,
+  padding: 16,
+  textAlign: "left",
+  cursor: "pointer",
+};
+
+const sessionTopStyle: React.CSSProperties = {
+  display: "flex",
+  justifyContent: "space-between",
   gap: 10,
-  marginBottom: 6,
+  marginBottom: 8,
 };
 
 const sessionDayStyle: React.CSSProperties = {
-  fontSize: 12,
   color: "#D6FF4D",
-  fontWeight: 700,
+  fontSize: 12,
+  fontWeight: 900,
 };
 
 const sessionZoneStyle: React.CSSProperties = {
-  fontSize: 12,
   color: "#00E6FF",
-  fontWeight: 700,
+  fontSize: 12,
+  fontWeight: 900,
 };
 
 const sessionTitleStyle: React.CSSProperties = {
-  fontSize: 16,
-  fontWeight: 700,
-  marginBottom: 6,
+  fontSize: 17,
+  fontWeight: 900,
 };
 
 const sessionMetaStyle: React.CSSProperties = {
+  color: "rgba(255,255,255,0.64)",
   fontSize: 13,
-  color: "rgba(255,255,255,0.65)",
-  marginBottom: 6,
+  marginTop: 7,
 };
 
-const sessionObjectiveStyle: React.CSSProperties = {
+const actionsRowStyle: React.CSSProperties = {
+  marginTop: 18,
+  display: "flex",
+  gap: 12,
+  flexWrap: "wrap",
+};
+
+const metricMiniGridStyle: React.CSSProperties = {
+  display: "grid",
+  gap: 6,
+  marginTop: 14,
+  color: "rgba(255,255,255,0.65)",
   fontSize: 13,
-  color: "rgba(255,255,255,0.82)",
-  lineHeight: 1.5,
+};
+
+const pricingGridStyle: React.CSSProperties = {
+  display: "grid",
+  gap: 16,
+  marginTop: 22,
 };
 
 const pricingCardStyle: React.CSSProperties = {
   borderRadius: 24,
+  padding: 20,
+  background: "rgba(255,255,255,0.04)",
   border: "1px solid rgba(255,255,255,0.08)",
-  background: "rgba(255,255,255,0.03)",
-  padding: 22,
   display: "flex",
   flexDirection: "column",
-  minHeight: 720,
+  minHeight: 560,
   overflow: "hidden",
 };
 
 const pricingFeaturedStyle: React.CSSProperties = {
-  boxShadow:
-    "0 0 0 1px rgba(214,255,77,0.18), 0 18px 40px rgba(214,255,77,0.08)",
-};
-
-const pricingHeaderBlockStyle: React.CSSProperties = {
-  display: "flex",
-  flexDirection: "column",
-  gap: 8,
+  boxShadow: "0 0 0 1px rgba(214,255,77,0.20), 0 18px 40px rgba(214,255,77,0.08)",
 };
 
 const pricingTagStyle: React.CSSProperties = {
-  display: "inline-flex",
-  alignItems: "center",
-  padding: "7px 10px",
-  borderRadius: 999,
-  background: "rgba(0,230,255,0.10)",
-  color: "#00E6FF",
-  fontSize: 12,
-  fontWeight: 700,
-  width: "fit-content",
-  alignSelf: "flex-start",
-};
-
-const pricingTitleStyle: React.CSSProperties = {
-  margin: "12px 0 0 0",
-  fontSize: 24,
-};
-
-const pricingPriceStyle: React.CSSProperties = {
-  fontSize: 34,
-  fontWeight: 800,
+  ...badgeStyle,
   color: "#D6FF4D",
-  lineHeight: 1.1,
+  background: "rgba(214,255,77,0.10)",
 };
 
-const pricingPeriodStyle: React.CSSProperties = {
+const priceStyle: React.CSSProperties = {
+  fontSize: 34,
+  fontWeight: 950,
+  color: "#D6FF4D",
+  marginTop: 12,
+};
+
+const pricePeriodStyle: React.CSSProperties = {
   color: "rgba(255,255,255,0.62)",
-  fontSize: 14,
+  fontSize: 13,
+  marginTop: 4,
 };
 
-const pricingListStyle: React.CSSProperties = {
+const featureListStyle: React.CSSProperties = {
   display: "grid",
-  gap: 16,
-  marginTop: 28,
-  minHeight: 170,
-  alignContent: "start",
+  gap: 12,
+  marginTop: 24,
+  color: "rgba(255,255,255,0.78)",
+  lineHeight: 1.45,
 };
 
-const pricingItemStyle: React.CSSProperties = {
-  color: "rgba(255,255,255,0.85)",
-  lineHeight: 1.5,
+const featureItemStyle: React.CSSProperties = {
   fontSize: 14,
 };
 
-const paypalShellStyle: React.CSSProperties = {
+const paypalContainerStyle: React.CSSProperties = {
   marginTop: "auto",
   width: "100%",
   maxWidth: "100%",
   overflow: "hidden",
-  paddingTop: 12,
+  paddingTop: 20,
 };
 
 const paypalButtonWrapStyle: React.CSSProperties = {
@@ -2566,237 +2130,71 @@ const paypalButtonWrapStyle: React.CSSProperties = {
   transformOrigin: "center bottom",
 };
 
-const membershipNoteStyle: React.CSSProperties = {
-  marginTop: 18,
-  color: "rgba(255,255,255,0.62)",
-  fontSize: 13,
-};
-
-const membershipStatusCardStyle: React.CSSProperties = {
-  marginTop: 18,
-  borderRadius: 18,
-  padding: 16,
-  background: "rgba(255,255,255,0.04)",
-  border: "1px solid rgba(255,255,255,0.08)",
-};
-
-const membershipStatusTitleStyle: React.CSSProperties = {
-  fontSize: 14,
-  fontWeight: 800,
-  color: "#D6FF4D",
-};
-
-const membershipStatusTextStyle: React.CSSProperties = {
-  marginTop: 6,
-  color: "rgba(255,255,255,0.78)",
-  fontSize: 14,
-};
-
-const lockedCardStyle: React.CSSProperties = {
-  borderRadius: 24,
-  padding: 22,
-  border: "1px solid rgba(255,255,255,0.08)",
-  background: "rgba(255,255,255,0.03)",
-};
-
-const lockedTitleStyle: React.CSSProperties = {
-  fontSize: 26,
-  fontWeight: 800,
-};
-
-const lockedTextStyle: React.CSSProperties = {
-  marginTop: 10,
-  color: "rgba(255,255,255,0.72)",
-  lineHeight: 1.6,
-};
-
-const entitlementsCardStyle: React.CSSProperties = {
-  borderRadius: 22,
-  padding: 18,
-  border: "1px solid rgba(255,255,255,0.08)",
-  background: "rgba(255,255,255,0.03)",
-  marginBottom: 18,
-};
-
-const entitlementsTitleStyle: React.CSSProperties = {
-  fontSize: 16,
-  fontWeight: 800,
-  marginBottom: 12,
-};
-
-const entitlementsGridStyle: React.CSSProperties = {
+const profileDetailsGridStyle: React.CSSProperties = {
   display: "grid",
-  gap: 10,
-};
-
-const entitlementItemStyle: React.CSSProperties = {
-  borderRadius: 14,
-  padding: 12,
-  background: "#0B0F14",
-  border: "1px solid rgba(255,255,255,0.06)",
-  fontSize: 14,
-  color: "rgba(255,255,255,0.84)",
-};
-
-const stravaPlaceholderCardStyle: React.CSSProperties = {
-  borderRadius: 22,
-  padding: 18,
-  border: "1px solid rgba(0,230,255,0.16)",
-  background: "rgba(0,230,255,0.06)",
-  marginTop: 18,
-};
-
-const stravaPlaceholderTitleStyle: React.CSSProperties = {
-  fontSize: 18,
-  fontWeight: 800,
-  color: "#00E6FF",
-};
-
-const stravaPlaceholderTextStyle: React.CSSProperties = {
-  marginTop: 8,
-  color: "rgba(255,255,255,0.82)",
-  lineHeight: 1.6,
+  gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
+  gap: 14,
+  marginTop: 22,
 };
 
 const modalOverlayStyle: React.CSSProperties = {
   position: "fixed",
   inset: 0,
-  background: "rgba(3,6,10,0.72)",
+  background: "rgba(4,7,10,0.76)",
   backdropFilter: "blur(8px)",
   display: "flex",
   alignItems: "center",
   justifyContent: "center",
-  padding: 20,
-  zIndex: 30,
+  padding: 18,
+  zIndex: 50,
 };
 
-const modalCardStyle: React.CSSProperties = {
+const modalStyle: React.CSSProperties = {
   width: "100%",
+  maxWidth: 680,
+  maxHeight: "88vh",
+  overflowY: "auto",
   background: "linear-gradient(180deg, #11161D 0%, #0B0F14 100%)",
-  border: "1px solid rgba(255,255,255,0.08)",
+  border: "1px solid rgba(255,255,255,0.10)",
   borderRadius: 28,
-  boxShadow: "0 24px 80px rgba(0,0,0,0.5)",
+  padding: 24,
+  boxShadow: "0 24px 80px rgba(0,0,0,0.55)",
 };
 
 const modalHeaderStyle: React.CSSProperties = {
   display: "flex",
   justifyContent: "space-between",
-  alignItems: "start",
   gap: 14,
-};
-
-const modalEyebrowStyle: React.CSSProperties = {
-  fontSize: 12,
-  color: "#00E6FF",
-  fontWeight: 700,
-  marginBottom: 8,
-};
-
-const modalTitleStyle: React.CSSProperties = {
-  margin: 0,
+  alignItems: "flex-start",
 };
 
 const closeButtonStyle: React.CSSProperties = {
+  width: 40,
+  height: 40,
+  borderRadius: 14,
+  border: "1px solid rgba(255,255,255,0.10)",
   background: "rgba(255,255,255,0.06)",
-  border: "1px solid rgba(255,255,255,0.08)",
-  color: "white",
-  width: 38,
-  height: 38,
-  borderRadius: 12,
+  color: "#fff",
   cursor: "pointer",
+  fontWeight: 900,
 };
 
-const modalMetaStyle: React.CSSProperties = {
-  marginTop: 14,
-  marginBottom: 18,
-  color: "rgba(255,255,255,0.7)",
-  fontSize: 14,
-};
-
-const detailBlockStyle: React.CSSProperties = {
-  borderRadius: 16,
-  background: "rgba(255,255,255,0.03)",
-  border: "1px solid rgba(255,255,255,0.06)",
-  padding: 14,
+const detailBoxStyle: React.CSSProperties = {
+  borderRadius: 18,
+  padding: 15,
+  background: "rgba(255,255,255,0.04)",
+  border: "1px solid rgba(255,255,255,0.08)",
   marginTop: 12,
 };
 
 const detailTitleStyle: React.CSSProperties = {
-  fontSize: 12,
   color: "#D6FF4D",
-  fontWeight: 700,
+  fontSize: 12,
+  fontWeight: 900,
   marginBottom: 6,
 };
 
 const detailTextStyle: React.CSSProperties = {
-  color: "rgba(255,255,255,0.84)",
-  lineHeight: 1.6,
-  fontSize: 14,
-};
-
-const membershipOverviewCardStyle: React.CSSProperties = {
-  borderRadius: 24,
-  padding: 20,
-  border: "1px solid rgba(255,255,255,0.08)",
-  background: "rgba(255,255,255,0.03)",
-};
-
-const membershipOverviewHeaderStyle: React.CSSProperties = {
-  display: "flex",
-  justifyContent: "space-between",
-  alignItems: "center",
-  gap: 14,
-  marginBottom: 16,
-  flexWrap: "wrap",
-};
-
-const membershipOverviewEyebrowStyle: React.CSSProperties = {
-  fontSize: 12,
-  color: "#00E6FF",
-  fontWeight: 700,
-  marginBottom: 6,
-};
-
-const membershipOverviewTitleStyle: React.CSSProperties = {
-  fontSize: 24,
-  fontWeight: 800,
-  color: "#fff",
-};
-
-const membershipOverviewStatusBadgeStyle: React.CSSProperties = {
-  display: "inline-flex",
-  alignItems: "center",
-  justifyContent: "center",
-  padding: "8px 12px",
-  borderRadius: 999,
-  background: "rgba(214,255,77,0.12)",
-  color: "#D6FF4D",
-  fontSize: 12,
-  fontWeight: 800,
-};
-
-const membershipOverviewGridStyle: React.CSSProperties = {
-  display: "grid",
-  gap: 12,
-};
-
-const membershipOverviewItemStyle: React.CSSProperties = {
-  borderRadius: 18,
-  padding: 14,
-  background: "#0B0F14",
-  border: "1px solid rgba(255,255,255,0.06)",
-};
-
-const membershipOverviewItemLabelStyle: React.CSSProperties = {
-  fontSize: 12,
-  color: "rgba(255,255,255,0.55)",
-  marginBottom: 6,
-};
-
-const membershipOverviewItemValueStyle: React.CSSProperties = {
-  fontSize: 15,
-  color: "#fff",
-  fontWeight: 700,
-  lineHeight: 1.4,
-  wordBreak: "break-word",
+  color: "rgba(255,255,255,0.78)",
+  lineHeight: 1.55,
 };
