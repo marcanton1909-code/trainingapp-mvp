@@ -3756,4 +3756,12 @@ app.post("/api/mercadopago/webhook", async (c) => {
   }
 });
 
+app.get("/api/debug/version", (c) => {
+  return c.json({
+    ok: true,
+    version: "strava-diagnostics-v2",
+    deployedAt: new Date().toISOString(),
+  });
+});
+
 export default app;
