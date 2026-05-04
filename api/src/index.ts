@@ -1503,7 +1503,7 @@ async function refreshStravaTokenIfNeeded(
 }
 
 async function fetchStravaActivities(accessToken: string) {
-  const after = Math.floor(Date.now() / 1000) - 1000 * 60 * 60 * 24 * 90;
+  const after = Math.floor(Date.now() / 1000) - 60 * 60 * 24 * 90;
   const all: StravaActivity[] = [];
 
   for (let page = 1; page <= 3; page++) {
