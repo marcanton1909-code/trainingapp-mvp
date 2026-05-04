@@ -2781,7 +2781,7 @@ app.get("/api/strava/connect-url", async (c) => {
     url.searchParams.set("response_type", "code");
     url.searchParams.set("redirect_uri", c.env.STRAVA_REDIRECT_URI);
     url.searchParams.set("approval_prompt", "auto");
-    url.searchParams.set("scope", "read,activity:read_all");
+    url.searchParams.set("scope", "read,activity:read");
     url.searchParams.set("state", state);
 
     return c.json({
