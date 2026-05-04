@@ -1513,13 +1513,25 @@ async function fetchStravaActivities(accessToken: string) {
     url.searchParams.set("page", String(page));
 
     const response = await fetch(url.toString(), {
+      method: "GET",
       headers: {
         Authorization: `Bearer ${accessToken}`,
+        Accept: "application/json",
       },
     });
 
     if (!response.ok) {
-      throw new Error("No fue posible consultar actividades de Strava");
+      let detail = "";
+
+      try {
+        detail = await response.text();
+      } catch {
+        detail = "No se pudo leer el detalle del error de Strava";
+      }
+
+      throw new Error(
+        `Strava activities error ${response.status}: ${detail || response.statusText}`
+      );
     }
 
     const data = (await response.json()) as StravaActivity[];
