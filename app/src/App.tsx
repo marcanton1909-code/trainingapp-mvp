@@ -219,6 +219,20 @@ function isStravaReviewEnabled() {
   return new URLSearchParams(window.location.search).get(STRAVA_REVIEW_QUERY_PARAM) === "1";
 }
 
+function normalizeDistance(value?: string | null) {
+  if (!value) return null;
+
+  const clean = String(value).trim().toUpperCase().replace(" ", "");
+
+  if (clean === "5" || clean === "5K" || clean === "5KM") return "5K";
+  if (clean === "10" || clean === "10K" || clean === "10KM") return "10K";
+  if (clean === "15" || clean === "15K" || clean === "15KM") return "15K";
+  if (clean === "21" || clean === "21K" || clean === "21KM") return "21K";
+  if (clean === "42" || clean === "42K" || clean === "42KM") return "42K";
+
+  return clean;
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<TabMode>("login");
   const [authLoading, setAuthLoading] = useState(true);
@@ -363,13 +377,22 @@ export default function App() {
   }, [authUser?.id, authToken]);
 
   useEffect(() => {
-    if (!allowedDistances.includes(form.distance)) {
-      setForm((prev) => ({
+  setForm((prev) => {
+    const normalized = normalizeDistance(prev.distance) || prev.distance;
+
+    if (allowedDistances.includes(normalized)) {
+      return {
         ...prev,
-        distance: allowedDistances[0] || "5K",
-      }));
+        distance: normalized,
+      };
     }
-  }, [planCode]);
+
+    return {
+      ...prev,
+      distance: allowedDistances[0] || "5K",
+    };
+  });
+}, [planCode, allowedDistances.join(",")]);
 
   useEffect(() => {
     async function initPayPal() {
@@ -441,19 +464,49 @@ export default function App() {
   }
 
   async function fetchPlanSilently() {
-    if (!authUser?.id) return;
+  if (!authUser?.id) return;
 
-    try {
-      const res = await fetch(`${API_URL}/api/plan/${authUser.id}`);
-      const data = await res.json();
+  try {
+    const res = await fetch(`${API_URL}/api/plan/${authUser.id}`);
+    const data = await res.json();
 
-      if (res.ok) {
-        setWeeks(data.weeks || []);
+    if (res.ok) {
+      setWeeks(data.weeks || []);
+
+      const savedDistance =
+        normalizeDistance(data.runnerGoal?.target_distance) ||
+        normalizeDistance(data.plan?.target_distance) ||
+        normalizeDistance(data.plan?.distance) ||
+        normalizeDistance(data.plan?.goal_distance);
+
+      if (data.runnerProfile || data.runnerGoal || savedDistance) {
+        setForm((prev) => ({
+          ...prev,
+          goal:
+            data.runnerGoal?.goal_type ||
+            data.runnerProfile?.preferred_goal_type ||
+            prev.goal,
+          distance: savedDistance || prev.distance,
+          daysPerWeek: Number(
+            data.runnerProfile?.weekly_days_available || prev.daysPerWeek
+          ),
+          level: data.runnerProfile?.experience_level || prev.level,
+          currentVolumeKm: Number(
+            data.runnerProfile?.current_weekly_volume ?? prev.currentVolumeKm
+          ),
+          eventName:
+            data.runnerGoal?.target_event_name ||
+            prev.eventName,
+          eventDate:
+            data.runnerGoal?.target_event_date ||
+            prev.eventDate,
+        }));
       }
-    } catch {
-      // Sin bloquear UI
     }
+  } catch {
+    // Sin bloquear UI
   }
+}
 
   async function fetchMetricsSilently() {
     if (!authToken) return;
@@ -855,16 +908,15 @@ export default function App() {
           <aside className="sidebar">
             <div>
               <BrandMark />
-              <div className="brand-subtitle">Running Intelligence</div>
 
-              <div className="profile-card">
-                <strong>{authUser.name}</strong>
-                <span>{authUser.email}</span>
-                <em>{getPlanLabel(planCode)}</em>
-                <button className="mobile-logout-inline" onClick={handleLogout}>
-                  Cerrar sesión
-                </button>
-              </div>
+<div className="profile-card">
+  <strong>{authUser.name}</strong>
+  <span>{authUser.email}</span>
+  <em>{getPlanLabel(planCode)}</em>
+  <button className="mobile-logout-inline" onClick={handleLogout}>
+    Cerrar sesión
+  </button>
+</div>
 
               <nav className="nav">
                 <NavButton active={activeTab === "home"} onClick={() => setActiveTab("home")}>
@@ -1679,6 +1731,8 @@ function PublicLandingIntro({
 }) {
   return (
     <section className="public-hero">
+      <BrandMark />
+
       <span className="chip lime">{BETA_COPY.badge}</span>
       <h1>Planes de running listos para entrenar hoy</h1>
       <p className="public-lead">
