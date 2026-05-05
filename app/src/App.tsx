@@ -206,6 +206,14 @@ function hasAnyMetric(metrics: MetricsResponse | null) {
   );
 }
 
+function getCompletedSessionsKey(userId: string) {
+  return `trainingapp_completed_sessions_${userId}`;
+}
+
+function getSessionKey(session: Session, weekNumber: number, index: number) {
+  return session.id || `week-${weekNumber}-session-${index}-${session.title}`;
+}
+
 function isStravaReviewEnabled() {
   if (typeof window === "undefined") return false;
   return new URLSearchParams(window.location.search).get(STRAVA_REVIEW_QUERY_PARAM) === "1";
@@ -249,6 +257,7 @@ export default function App() {
   const [weeks, setWeeks] = useState<Week[]>([]);
   const [metrics, setMetrics] = useState<MetricsResponse | null>(null);
   const [selectedSession, setSelectedSession] = useState<Session | null>(null);
+  const [completedSessions, setCompletedSessions] = useState<Record<string, boolean>>({});
   const [result, setResult] = useState("");
 
   const [loading, setLoading] = useState(false);
@@ -278,6 +287,9 @@ export default function App() {
   const currentSessions = currentWeek?.sessions || [];
   const highlightedSession = currentSessions[0] || null;
   const mainMetric = metrics?.days28 || metrics?.days7 || null;
+  const completedThisWeek = currentSessions.filter((session, index) =>
+    completedSessions[getSessionKey(session, currentWeek?.week_number || 1, index)]
+  ).length;
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -306,6 +318,17 @@ export default function App() {
       setActiveTab("login");
     }
   }, []);
+
+  useEffect(() => {
+    if (!authUser?.id) return;
+
+    try {
+      const stored = localStorage.getItem(getCompletedSessionsKey(authUser.id));
+      setCompletedSessions(stored ? JSON.parse(stored) : {});
+    } catch {
+      setCompletedSessions({});
+    }
+  }, [authUser?.id]);
 
   useEffect(() => {
     async function boot() {
@@ -757,6 +780,19 @@ export default function App() {
     }
   }
 
+  function toggleSessionCompleted(session: Session, weekNumber: number, index: number) {
+    if (!authUser?.id) return;
+
+    const key = getSessionKey(session, weekNumber, index);
+    const next = {
+      ...completedSessions,
+      [key]: !completedSessions[key],
+    };
+
+    setCompletedSessions(next);
+    localStorage.setItem(getCompletedSessionsKey(authUser.id), JSON.stringify(next));
+  }
+
   async function saveQuickCheckin() {
     if (!authToken) return;
 
@@ -838,7 +874,7 @@ export default function App() {
                   Perfil de corredor
                 </NavButton>
                 <NavButton active={activeTab === "plan"} onClick={() => setActiveTab("plan")}>
-                  Mi plan
+                  Entrenamiento
                 </NavButton>
                 <NavButton active={activeTab === "metrics"} onClick={() => setActiveTab("metrics")}>
                   Métricas
@@ -847,7 +883,7 @@ export default function App() {
                   Membresía
                 </NavButton>
                 <NavButton active={activeTab === "profile"} onClick={() => setActiveTab("profile")}>
-                  Perfil
+                  Mis datos
                 </NavButton>
               </nav>
             </div>
@@ -1273,8 +1309,8 @@ export default function App() {
           {authUser && activeTab === "plan" && (
             <section className="card">
               <Header
-                badge="Mi plan"
-                title="Semana actual"
+                badge="Entrenamiento"
+                title="Mi plan de entrenamiento"
                 subtitle="Tu plan estándar se genera según objetivo, distancia, nivel, disponibilidad y fecha."
               />
 
@@ -1295,32 +1331,61 @@ export default function App() {
                     <div>
                       <h2>Semana {currentWeek.week_number}</h2>
                       <p>{currentWeek.focus_label}</p>
+                      <span className="completion-summary">
+                        {completedThisWeek} de {currentSessions.length} sesiones realizadas
+                      </span>
                     </div>
                     <strong>{currentWeek.total_target_distance} km</strong>
                   </div>
 
                   <div className="session-list">
-                    {currentWeek.sessions.map((session, index) => (
-                      <button
-                        className="session-card"
-                        key={session.id || index}
-                        onClick={() => setSelectedSession(session)}
-                      >
-                        <div className="session-top">
-                          <span>{session.day_of_week || "Sesión"}</span>
-                          <em>{session.intensity_zone || "General"}</em>
+                    {currentWeek.sessions.map((session, index) => {
+                      const sessionKey = getSessionKey(
+                        session,
+                        currentWeek.week_number,
+                        index
+                      );
+                      const isCompleted = Boolean(completedSessions[sessionKey]);
+
+                      return (
+                        <div
+                          className={isCompleted ? "session-card completed" : "session-card"}
+                          key={session.id || index}
+                        >
+                          <button
+                            className="session-content-button"
+                            onClick={() => setSelectedSession(session)}
+                          >
+                            <div className="session-top">
+                              <span>{session.day_of_week || "Sesión"}</span>
+                              <em>{isCompleted ? "Realizada" : session.intensity_zone || "General"}</em>
+                            </div>
+                            <h3>{session.title}</h3>
+                            <p>
+                              {session.distance_target
+                                ? `${session.distance_target} km`
+                                : "Complementario"}
+                              {session.duration_target
+                                ? ` · ${session.duration_target} min`
+                                : ""}
+                            </p>
+                          </button>
+
+                          <button
+                            className={isCompleted ? "done-button active" : "done-button"}
+                            onClick={() =>
+                              toggleSessionCompleted(
+                                session,
+                                currentWeek.week_number,
+                                index
+                              )
+                            }
+                          >
+                            {isCompleted ? "Realizada ✓" : "Marcar realizada"}
+                          </button>
                         </div>
-                        <h3>{session.title}</h3>
-                        <p>
-                          {session.distance_target
-                            ? `${session.distance_target} km`
-                            : "Complementario"}
-                          {session.duration_target
-                            ? ` · ${session.duration_target} min`
-                            : ""}
-                        </p>
-                      </button>
-                    ))}
+                      );
+                    })}
                   </div>
                 </>
               )}
@@ -1471,7 +1536,7 @@ export default function App() {
           {authUser && activeTab === "profile" && (
             <section className="card">
               <Header
-                badge="Perfil"
+                badge="Mis datos"
                 title="Cuenta y acceso"
                 subtitle="Revisa tu usuario, membresía, conexión de Strava y permisos activos."
               />
@@ -1508,7 +1573,7 @@ export default function App() {
             Perfil corredor
           </button>
           <button onClick={() => setActiveTab("plan")} className={activeTab === "plan" ? "active" : ""}>
-            Mi plan
+            Entrenamiento
           </button>
           <button onClick={() => setActiveTab("metrics")} className={activeTab === "metrics" ? "active" : ""}>
             Métricas
@@ -1517,7 +1582,7 @@ export default function App() {
             Membresía
           </button>
           <button onClick={() => setActiveTab("profile")} className={activeTab === "profile" ? "active" : ""}>
-            Perfil
+            Mis datos
           </button>
         </nav>
       )}
@@ -2480,18 +2545,65 @@ button:disabled {
   border-radius: 18px;
   padding: 16px;
   text-align: left;
+  display: grid;
+  gap: 12px;
+}
+
+.session-card.completed {
+  border-color: rgba(214,255,77,0.22);
+  background: rgba(214,255,77,0.065);
+}
+
+.session-content-button {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: white;
+  padding: 0;
+  text-align: left;
   cursor: pointer;
 }
 
-.session-card h3 {
+.session-card h3,
+.session-content-button h3 {
   margin: 8px 0 0;
   font-size: 18px;
 }
 
-.session-card p {
+.session-card p,
+.session-content-button p {
   color: rgba(255,255,255,0.64);
   font-size: 13px;
   margin: 7px 0 0;
+}
+
+.done-button {
+  width: fit-content;
+  border: 1px solid rgba(255,255,255,0.10);
+  background: rgba(255,255,255,0.05);
+  color: rgba(255,255,255,0.78);
+  border-radius: 14px;
+  padding: 10px 12px;
+  font-size: 12px;
+  font-weight: 950;
+  cursor: pointer;
+}
+
+.done-button.active {
+  border-color: rgba(214,255,77,0.28);
+  background: rgba(214,255,77,0.14);
+  color: #D6FF4D;
+}
+
+.completion-summary {
+  display: inline-flex;
+  margin-top: 10px;
+  border-radius: 999px;
+  padding: 8px 11px;
+  background: rgba(214,255,77,0.10);
+  color: #D6FF4D;
+  font-size: 12px;
+  font-weight: 950;
 }
 
 .session-top {
