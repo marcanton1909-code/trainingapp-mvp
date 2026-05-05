@@ -233,7 +233,7 @@ const ALLOWED_ORIGINS = [
 ];
 
 const APP_URL = "https://app.trainingapp.run";
-const PAYPAL_BASE_URL = "https://api-m.sandbox.paypal.com";
+const PAYPAL_BASE_URL = "https://api-m.paypal.com";
 const STRAVA_AUTHORIZE_URL = "https://www.strava.com/oauth/authorize";
 const STRAVA_TOKEN_URL = "https://www.strava.com/oauth/token";
 
