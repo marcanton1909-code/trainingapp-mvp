@@ -9,6 +9,15 @@ const PAYPAL_PRO_PLAN_ID = "P-2G5092788J304935ENHYRSJQ";
 
 const AUTH_TOKEN_KEY = "trainingapp_auth_token";
 
+const BETA_COPY = {
+  badge: "Acceso anticipado",
+  title: "Beta pagada activa",
+  short:
+    "Genera tu plan de running hoy. Conecta Strava para medir tu progreso y preparar futuros ajustes inteligentes.",
+  long:
+    "Estás usando una versión de acceso anticipado. El plan actual se genera con lógica estándar por objetivo, distancia, nivel, disponibilidad y fecha. La capa de ajustes inteligentes con IA se liberará progresivamente usando tu historial de entrenamiento.",
+};
+
 type TabMode =
   | "home"
   | "onboarding"
@@ -141,8 +150,7 @@ function loadPayPalSdk(clientId: string) {
     script.async = true;
     script.dataset.paypalSdk = "true";
     script.onload = () => resolve();
-    script.onerror = () =>
-      reject(new Error("No fue posible cargar PayPal"));
+    script.onerror = () => reject(new Error("No fue posible cargar PayPal"));
     document.body.appendChild(script);
   });
 }
@@ -267,7 +275,9 @@ export default function App() {
 
     if (stravaStatus) {
       if (stravaStatus === "connected") {
-        setResult("Strava conectado correctamente. Ya puedes sincronizar tus actividades.");
+        setResult(
+          "Strava conectado correctamente. Ya puedes sincronizar tus actividades."
+        );
         setActiveTab("metrics");
       } else {
         setResult(`Resultado de Strava: ${stravaStatus}`);
@@ -842,6 +852,8 @@ export default function App() {
               subtitle="Entra para consultar tu plan, membresía, Strava y métricas."
             >
               <form className="form" onSubmit={handleLogin}>
+                <BetaBanner compact />
+
                 <Field label="Correo">
                   <input
                     type="email"
@@ -890,6 +902,8 @@ export default function App() {
               subtitle="Crea tu usuario para generar tu plan y activar tu membresía."
             >
               <form className="form" onSubmit={handleRegister}>
+                <BetaBanner compact />
+
                 <Field label="Nombre">
                   <input
                     value={registerForm.name}
@@ -958,6 +972,8 @@ export default function App() {
                 subtitle="Genera tu plan, conecta Strava y mide tu progreso desde una sola vista."
               />
 
+              <BetaBanner />
+
               <div className="metrics-grid">
                 <StatCard
                   label="Membresía"
@@ -985,7 +1001,7 @@ export default function App() {
                 <StatCard
                   label="Strava"
                   value={strava.connected ? "Conectado" : "No conectado"}
-                  hint={canConnectStrava ? "Disponible" : "Requiere Performance"}
+                  hint={canConnectStrava ? "Disponible en beta" : "Requiere Performance"}
                 />
               </div>
 
@@ -1023,7 +1039,7 @@ export default function App() {
                       ? `${mainMetric.totalDistanceKm} km en 28 días · ${mainMetric.activityCount} actividades · ${formatPace(mainMetric.avgPaceSecondsPerKm)}`
                       : strava.connected
                       ? "Ya conectaste Strava. Sincroniza para actualizar tus datos."
-                      : "Performance y Pro Coach pueden conectar Strava para comenzar a guardar historial real."}
+                      : "Performance y Pro Coach pueden conectar Strava para guardar historial y preparar futuros ajustes inteligentes."}
                   </p>
 
                   {!canConnectStrava && (
@@ -1088,6 +1104,8 @@ export default function App() {
                     : "Performance y Pro Coach permiten planes desde 5K hasta 42K."
                 }
               />
+
+              <BetaBanner compact />
 
               <form className="form" onSubmit={handleOnboarding}>
                 <div className="two-col">
@@ -1230,6 +1248,8 @@ export default function App() {
                 subtitle="Tu plan estándar se genera según objetivo, distancia, nivel, disponibilidad y fecha."
               />
 
+              <BetaBanner compact />
+
               {!currentWeek && (
                 <EmptyState
                   title="Aún no tienes plan"
@@ -1297,7 +1317,7 @@ export default function App() {
               {canConnectStrava && !strava.connected && (
                 <EmptyState
                   title="Conecta Strava"
-                  text="Autoriza tu cuenta para sincronizar actividades y comenzar a crear historial real."
+                  text="Autoriza tu cuenta para sincronizar actividades. Strava está activo en beta para Performance y Pro Coach."
                   button={stravaLoading ? "Conectando..." : "Conectar Strava"}
                   onClick={connectStrava}
                 />
@@ -1311,7 +1331,7 @@ export default function App() {
                       <h2>Historial activo</h2>
                       <p>
                         {hasAnyMetric(metrics)
-                          ? "Tus métricas ya están disponibles."
+                          ? "Tus métricas ya están disponibles. Este historial será la base para futuros ajustes inteligentes."
                           : "Conexión lista. Sincroniza actividades para actualizar el dashboard."}
                       </p>
                     </div>
@@ -1343,6 +1363,8 @@ export default function App() {
                 subtitle="Starter para comenzar, Performance como plan principal y Pro Coach para seguimiento avanzado."
               />
 
+              <BetaBanner />
+
               {paypalLoading && <div className="notice">Cargando PayPal...</div>}
               {paypalError && <div className="notice error">{paypalError}</div>}
 
@@ -1351,6 +1373,7 @@ export default function App() {
                   title="Starter"
                   price="$149 MXN"
                   tag="Hasta 15K"
+                  description="Empieza con un plan claro para 5K, 10K o 15K."
                   features={[
                     "Planes 5K, 10K y 15K",
                     "Plan estándar por objetivo",
@@ -1365,10 +1388,11 @@ export default function App() {
                   title="Performance"
                   price="$249 MXN"
                   tag="Recomendado"
+                  description="Entrena con plan completo, Strava y métricas reales hasta maratón."
                   featured
                   features={[
                     "Planes 5K a 42K",
-                    "Conexión con Strava",
+                    "Conexión con Strava en beta",
                     "Métricas reales",
                     "Dashboard completo",
                     "Historial para futura IA",
@@ -1380,6 +1404,7 @@ export default function App() {
                   title="Pro Coach"
                   price="$449 MXN"
                   tag="Premium"
+                  description="Todo Performance más check-in semanal y guía extra."
                   features={[
                     "Todo Performance",
                     "Check-in semanal",
@@ -1526,6 +1551,18 @@ function Header({
   );
 }
 
+function BetaBanner({ compact = false }: { compact?: boolean }) {
+  return (
+    <div className={compact ? "beta-banner compact" : "beta-banner"}>
+      <span className="chip lime">{BETA_COPY.badge}</span>
+      <div>
+        <strong>{BETA_COPY.title}</strong>
+        <p>{compact ? BETA_COPY.short : BETA_COPY.long}</p>
+      </div>
+    </div>
+  );
+}
+
 function Field({
   label,
   children,
@@ -1614,6 +1651,7 @@ function PlanCard({
   title,
   price,
   tag,
+  description,
   features,
   paypalRef,
   featured,
@@ -1621,6 +1659,7 @@ function PlanCard({
   title: string;
   price: string;
   tag: string;
+  description: string;
   features: string[];
   paypalRef: RefObject<HTMLDivElement | null>;
   featured?: boolean;
@@ -1631,6 +1670,7 @@ function PlanCard({
       <h2>{title}</h2>
       <strong>{price}</strong>
       <em>mensual</em>
+      <p className="plan-description">{description}</p>
 
       <ul>
         {features.map((feature) => (
@@ -1907,6 +1947,37 @@ button:disabled {
   line-height: 1.6;
 }
 
+.beta-banner {
+  border-radius: 24px;
+  padding: 18px;
+  margin: 18px 0;
+  background: linear-gradient(135deg, rgba(214,255,77,0.12), rgba(0,230,255,0.07));
+  border: 1px solid rgba(214,255,77,0.16);
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 14px;
+  align-items: start;
+}
+
+.beta-banner.compact {
+  grid-template-columns: 1fr;
+  padding: 16px;
+}
+
+.beta-banner strong {
+  display: block;
+  color: #fff;
+  font-size: 16px;
+  font-weight: 950;
+}
+
+.beta-banner p {
+  margin: 7px 0 0;
+  color: rgba(255,255,255,0.72);
+  line-height: 1.55;
+  font-size: 14px;
+}
+
 .form {
   display: grid;
   gap: 14px;
@@ -2179,7 +2250,7 @@ button:disabled {
   border: 1px solid rgba(255,255,255,0.08);
   display: flex;
   flex-direction: column;
-  min-height: 560px;
+  min-height: 590px;
   overflow: hidden;
 }
 
@@ -2204,6 +2275,13 @@ button:disabled {
   font-size: 13px;
   font-style: normal;
   margin-top: 4px;
+}
+
+.plan-description {
+  color: rgba(255,255,255,0.68);
+  line-height: 1.5;
+  font-size: 14px;
+  margin: 14px 0 0;
 }
 
 .price-card ul {
@@ -2339,6 +2417,10 @@ button:disabled {
   .two-col,
   .split-grid,
   .pricing-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .beta-banner {
     grid-template-columns: 1fr;
   }
 
