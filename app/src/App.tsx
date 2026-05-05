@@ -815,6 +815,9 @@ export default function App() {
                 <strong>{authUser.name}</strong>
                 <span>{authUser.email}</span>
                 <em>{getPlanLabel(planCode)}</em>
+                <button className="mobile-logout-inline" onClick={handleLogout}>
+                  Cerrar sesión
+                </button>
               </div>
 
               <nav className="nav">
@@ -822,7 +825,7 @@ export default function App() {
                   Home
                 </NavButton>
                 <NavButton active={activeTab === "onboarding"} onClick={() => setActiveTab("onboarding")}>
-                  Objetivo
+                  Perfil de corredor
                 </NavButton>
                 <NavButton active={activeTab === "plan"} onClick={() => setActiveTab("plan")}>
                   Mi plan
@@ -1018,7 +1021,7 @@ export default function App() {
                   <h2>{highlightedSession?.title || "Configura tu plan"}</h2>
                   <p>
                     {highlightedSession?.objective ||
-                      "Completa tu objetivo y activa tu membresía para iniciar."}
+                      "Completa tu perfil de corredor y activa tu membresía para iniciar."}
                   </p>
 
                   {highlightedSession ? (
@@ -1033,7 +1036,7 @@ export default function App() {
                       className="primary-button"
                       onClick={() => setActiveTab("onboarding")}
                     >
-                      Completar objetivo
+                      Perfil de corredor
                     </button>
                   )}
                 </div>
@@ -1103,8 +1106,8 @@ export default function App() {
           {authUser && activeTab === "onboarding" && (
             <section className="card">
               <Header
-                badge="Objetivo"
-                title="Configura tu plan"
+                badge="Perfil de corredor"
+                title="Configura tu perfil de corredor"
                 subtitle={
                   planCode === "starter"
                     ? "Starter permite planes 5K, 10K y 15K. Para 21K o 42K cambia a Performance."
@@ -1260,8 +1263,8 @@ export default function App() {
               {!currentWeek && (
                 <EmptyState
                   title="Aún no tienes plan"
-                  text="Completa tu objetivo y activa tu membresía para generar el plan."
-                  button="Configurar objetivo"
+                  text="Completa tu perfil de corredor y activa tu membresía para generar el plan."
+                  button="Perfil de corredor"
                   onClick={() => setActiveTab("onboarding")}
                 />
               )}
@@ -1459,14 +1462,20 @@ export default function App() {
           <button onClick={() => setActiveTab("home")} className={activeTab === "home" ? "active" : ""}>
             Home
           </button>
+          <button onClick={() => setActiveTab("onboarding")} className={activeTab === "onboarding" ? "active" : ""}>
+            Perfil corredor
+          </button>
           <button onClick={() => setActiveTab("plan")} className={activeTab === "plan" ? "active" : ""}>
-            Plan
+            Mi plan
           </button>
           <button onClick={() => setActiveTab("metrics")} className={activeTab === "metrics" ? "active" : ""}>
             Métricas
           </button>
           <button onClick={() => setActiveTab("membership")} className={activeTab === "membership" ? "active" : ""}>
-            Planes
+            Membresía
+          </button>
+          <button onClick={() => setActiveTab("profile")} className={activeTab === "profile" ? "active" : ""}>
+            Perfil
           </button>
         </nav>
       )}
@@ -1568,16 +1577,31 @@ function PublicLandingIntro({
 
       <div className="public-feature-grid">
         <div>
+          <span className="plan-tag">Hasta 15K</span>
           <strong>Starter</strong>
+          <b>$149 MXN / mes</b>
           <span>Planes 5K, 10K y 15K para empezar con estructura clara.</span>
+          <button className="public-plan-button" onClick={onCreateAccount}>
+            Comprar Starter
+          </button>
         </div>
-        <div>
+        <div className="public-featured-plan">
+          <span className="plan-tag">Recomendado</span>
           <strong>Performance</strong>
+          <b>$249 MXN / mes</b>
           <span>Hasta 42K, conexión con Strava y métricas reales.</span>
+          <button className="public-plan-button" onClick={onCreateAccount}>
+            Comprar Performance
+          </button>
         </div>
         <div>
+          <span className="plan-tag">Premium</span>
           <strong>Pro Coach</strong>
+          <b>$449 MXN / mes</b>
           <span>Todo Performance más check-in semanal y guía extra.</span>
+          <button className="public-plan-button" onClick={onCreateAccount}>
+            Comprar Pro Coach
+          </button>
         </div>
       </div>
 
@@ -1906,6 +1930,19 @@ button:disabled {
   font-weight: 900;
 }
 
+.mobile-logout-inline {
+  display: none;
+  width: 100%;
+  margin-top: 12px;
+  border: 1px solid rgba(255,255,255,0.10);
+  background: rgba(255,255,255,0.05);
+  color: #fff;
+  border-radius: 14px;
+  padding: 12px 14px;
+  font-weight: 900;
+  cursor: pointer;
+}
+
 .nav {
   margin-top: 22px;
   display: grid;
@@ -1999,11 +2036,50 @@ button:disabled {
   border: 1px solid rgba(255,255,255,0.08);
 }
 
+.public-feature-grid .public-featured-plan {
+  background: linear-gradient(135deg, rgba(214,255,77,0.13), rgba(0,230,255,0.08));
+  border-color: rgba(214,255,77,0.22);
+  box-shadow: 0 18px 40px rgba(214,255,77,0.06);
+}
+
 .public-feature-grid strong,
 .public-beta-note strong {
   display: block;
   color: #D6FF4D;
   font-weight: 950;
+  font-size: 18px;
+}
+
+.public-feature-grid b {
+  display: block;
+  margin-top: 8px;
+  color: #fff;
+  font-size: 20px;
+  font-weight: 950;
+}
+
+.plan-tag {
+  display: inline-flex !important;
+  width: fit-content;
+  border-radius: 999px;
+  padding: 7px 10px;
+  margin-bottom: 12px;
+  background: rgba(0,230,255,0.10);
+  color: #00E6FF !important;
+  font-size: 11px !important;
+  font-weight: 950;
+}
+
+.public-plan-button {
+  width: 100%;
+  margin-top: 16px;
+  border: 1px solid rgba(214,255,77,0.26);
+  background: rgba(214,255,77,0.12);
+  color: #D6FF4D;
+  border-radius: 15px;
+  padding: 12px 14px;
+  font-weight: 950;
+  cursor: pointer;
 }
 
 .public-feature-grid span,
@@ -2526,7 +2602,7 @@ button:disabled {
   }
 
   .page {
-    padding: 12px 12px 96px;
+    padding: 12px 12px 138px;
   }
 
   .layout {
@@ -2542,6 +2618,10 @@ button:disabled {
   .sidebar .nav,
   .sidebar .logout-button {
     display: none;
+  }
+
+  .mobile-logout-inline {
+    display: block;
   }
 
   .profile-card {
@@ -2584,7 +2664,7 @@ button:disabled {
     bottom: 12px;
     z-index: 80;
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(3, 1fr);
     gap: 8px;
     padding: 10px;
     border-radius: 24px;
@@ -2597,11 +2677,13 @@ button:disabled {
   .mobile-nav button {
     border: 0;
     border-radius: 16px;
-    padding: 12px 8px;
+    padding: 11px 6px;
     background: transparent;
     color: rgba(255,255,255,0.65);
-    font-size: 12px;
+    font-size: 11px;
     font-weight: 950;
+    line-height: 1.15;
+    min-height: 44px;
   }
 
   .mobile-nav button.active {
