@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { CSSProperties, FormEvent, RefObject } from "react";
+import type { FormEvent, RefObject } from "react";
 
 const API_URL = "https://trainingapp-api.marco-cruz.workers.dev";
 
