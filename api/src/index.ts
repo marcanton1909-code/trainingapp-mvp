@@ -1400,9 +1400,9 @@ async function fetchPayPalSubscriptionDetail(
 function mapPayPalPlanCode(planId: string | null) {
   if (!planId) return null;
 
-  if (planId === "P-8NB63062HL487521UNHYRSJI") return "starter";
-  if (planId === "P-4C338724PN8826316NHYRSJQ") return "performance";
-  if (planId === "P-2G5092788J304935ENHYRSJQ") return "pro_coach";
+  if (planId === "P-19H35231X9575980TNH5DTZA") return "starter";
+  if (planId === "P-6GE16555S80643802NH5DTZA") return "performance";
+  if (planId === "P-7J192125FH642021ANH5DTZA") return "pro_coach";
 
   return planId;
 }
@@ -2241,7 +2241,7 @@ app.post("/api/paypal/bootstrap-plans", async (c) => {
 
     return c.json({
       ok: true,
-      environment: "sandbox",
+      environment: "live",
       product,
       plans: {
         starter: starterPlan,
