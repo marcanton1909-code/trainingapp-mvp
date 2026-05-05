@@ -804,7 +804,7 @@ export default function App() {
       <div className="glow glow-one" />
       <div className="glow glow-two" />
 
-      <div className={authUser ? "layout" : "auth-layout"}>
+      <div className={authUser ? "layout" : "public-layout"}>
         {authUser && (
           <aside className="sidebar">
             <div>
@@ -846,6 +846,13 @@ export default function App() {
         )}
 
         <main className="main">
+          {!authUser && (
+            <PublicLandingIntro
+              onLogin={() => setActiveTab("login")}
+              onCreateAccount={() => setActiveTab("register")}
+            />
+          )}
+
           {!authUser && activeTab === "login" && (
             <AuthCard
               title="Iniciar sesión"
@@ -1533,6 +1540,55 @@ function AuthCard({
   );
 }
 
+function PublicLandingIntro({
+  onLogin,
+  onCreateAccount,
+}: {
+  onLogin: () => void;
+  onCreateAccount: () => void;
+}) {
+  return (
+    <section className="public-hero">
+      <span className="chip lime">{BETA_COPY.badge}</span>
+      <h1>Planes de running listos para entrenar hoy</h1>
+      <p className="public-lead">
+        Crea tu plan por objetivo, distancia, nivel y disponibilidad. Conecta Strava
+        en Performance o Pro Coach para medir tu progreso y preparar futuros ajustes
+        inteligentes.
+      </p>
+
+      <div className="public-actions">
+        <button className="primary-button" onClick={onCreateAccount}>
+          Crear cuenta
+        </button>
+        <button className="ghost-button" onClick={onLogin}>
+          Ya tengo cuenta
+        </button>
+      </div>
+
+      <div className="public-feature-grid">
+        <div>
+          <strong>Starter</strong>
+          <span>Planes 5K, 10K y 15K para empezar con estructura clara.</span>
+        </div>
+        <div>
+          <strong>Performance</strong>
+          <span>Hasta 42K, conexión con Strava y métricas reales.</span>
+        </div>
+        <div>
+          <strong>Pro Coach</strong>
+          <span>Todo Performance más check-in semanal y guía extra.</span>
+        </div>
+      </div>
+
+      <div className="public-beta-note">
+        <strong>Beta pagada activa</strong>
+        <p>{BETA_COPY.long}</p>
+      </div>
+    </section>
+  );
+}
+
 function Header({
   badge,
   title,
@@ -1767,15 +1823,20 @@ button:disabled {
   z-index: 1;
 }
 
-.auth-layout {
+.public-layout {
   width: 100%;
-  max-width: 620px;
+  max-width: 1180px;
   margin: 0 auto;
   min-height: calc(100vh - 40px);
   display: grid;
-  place-items: center;
   position: relative;
   z-index: 1;
+}
+
+.public-layout .main {
+  grid-template-columns: minmax(0, 1.05fr) minmax(360px, 0.95fr);
+  align-items: center;
+  min-height: calc(100vh - 40px);
 }
 
 .sidebar {
@@ -1891,6 +1952,71 @@ button:disabled {
 
 .auth-card {
   width: 100%;
+}
+
+.public-hero {
+  background: linear-gradient(135deg, rgba(214,255,77,0.12), rgba(0,230,255,0.08), rgba(255,255,255,0.035));
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 34px;
+  padding: 34px;
+  box-shadow: 0 24px 70px rgba(0,0,0,0.34);
+}
+
+.public-hero h1 {
+  font-size: clamp(42px, 6vw, 74px);
+  line-height: 0.98;
+  margin: 18px 0 0;
+  letter-spacing: -0.055em;
+}
+
+.public-lead {
+  color: rgba(255,255,255,0.72);
+  font-size: 18px;
+  line-height: 1.6;
+  margin: 18px 0 0;
+  max-width: 720px;
+}
+
+.public-actions {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 26px;
+}
+
+.public-feature-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+  margin-top: 28px;
+}
+
+.public-feature-grid div,
+.public-beta-note {
+  border-radius: 20px;
+  padding: 16px;
+  background: rgba(255,255,255,0.045);
+  border: 1px solid rgba(255,255,255,0.08);
+}
+
+.public-feature-grid strong,
+.public-beta-note strong {
+  display: block;
+  color: #D6FF4D;
+  font-weight: 950;
+}
+
+.public-feature-grid span,
+.public-beta-note p {
+  display: block;
+  color: rgba(255,255,255,0.68);
+  line-height: 1.5;
+  margin-top: 8px;
+  font-size: 14px;
+}
+
+.public-beta-note {
+  margin-top: 14px;
 }
 
 .loading-screen {
@@ -2381,6 +2507,24 @@ button:disabled {
 }
 
 @media (max-width: 920px) {
+  .public-layout .main {
+    grid-template-columns: 1fr;
+    min-height: auto;
+  }
+
+  .public-hero {
+    padding: 24px;
+    border-radius: 28px;
+  }
+
+  .public-hero h1 {
+    font-size: clamp(38px, 12vw, 54px);
+  }
+
+  .public-feature-grid {
+    grid-template-columns: 1fr;
+  }
+
   .page {
     padding: 12px 12px 96px;
   }
