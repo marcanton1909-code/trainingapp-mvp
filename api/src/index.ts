@@ -989,6 +989,149 @@ async function validateDistanceForMembership(
   };
 }
 
+
+async function isUxFeedbackUser(db: D1Database, userId: string) {
+  const row = await db
+    .prepare(
+      `select id
+       from memberships
+       where user_id = ?1
+         and provider = 'manual'
+         and external_reference = 'ux-feedback'
+         and plan_code = 'pro_coach'
+         and status = 'active'
+       limit 1`
+    )
+    .bind(userId)
+    .first<{ id: string }>();
+
+  return Boolean(row?.id);
+}
+
+async function validatePlanChangeAllowance(db: D1Database, userId: string) {
+  const uxUser = await isUxFeedbackUser(db, userId);
+
+  if (uxUser) {
+    return {
+      ok: true,
+      isUxUser: true,
+      message: "Usuario UX sin límite de cambios.",
+    };
+  }
+
+  const existingPlans = await db
+    .prepare(
+      `select count(*) as total
+       from training_plans
+       where user_id = ?1`
+    )
+    .bind(userId)
+    .first<{ total: number }>();
+
+  const totalPlans = Number(existingPlans?.total || 0);
+
+  if (totalPlans === 0) {
+    return {
+      ok: true,
+      isUxUser: false,
+      message: "Primer plan permitido.",
+    };
+  }
+
+  const limit = await db
+    .prepare(
+      `select change_count, max_changes_allowed
+       from plan_change_limits
+       where user_id = ?1
+       limit 1`
+    )
+    .bind(userId)
+    .first<{
+      change_count: number;
+      max_changes_allowed: number;
+    }>();
+
+  const changeCount = Number(limit?.change_count || 0);
+  const maxAllowed = Number(limit?.max_changes_allowed || 1);
+
+  if (changeCount >= maxAllowed) {
+    return {
+      ok: false,
+      isUxUser: false,
+      message:
+        "Ya usaste el cambio disponible de plan. Para modificarlo nuevamente, contacta soporte.",
+    };
+  }
+
+  return {
+    ok: true,
+    isUxUser: false,
+    message: "Cambio de plan permitido.",
+  };
+}
+
+async function registerPlanChangeUsage(db: D1Database, userId: string) {
+  const uxUser = await isUxFeedbackUser(db, userId);
+
+  if (uxUser) return;
+
+  const now = new Date().toISOString();
+
+  const existingPlans = await db
+    .prepare(
+      `select count(*) as total
+       from training_plans
+       where user_id = ?1`
+    )
+    .bind(userId)
+    .first<{ total: number }>();
+
+  const totalPlans = Number(existingPlans?.total || 0);
+
+  const existingLimit = await db
+    .prepare(
+      `select id, change_count
+       from plan_change_limits
+       where user_id = ?1
+       limit 1`
+    )
+    .bind(userId)
+    .first<{ id: string; change_count: number }>();
+
+  if (!existingLimit?.id) {
+    await db
+      .prepare(
+        `insert into plan_change_limits (
+          id, user_id, initial_plan_created_at, change_count,
+          max_changes_allowed, updated_at
+        ) values (?1, ?2, ?3, ?4, 1, ?5)`
+      )
+      .bind(
+        crypto.randomUUID(),
+        userId,
+        now,
+        totalPlans > 0 ? 1 : 0,
+        now
+      )
+      .run();
+
+    return;
+  }
+
+  if (totalPlans > 0) {
+    await db
+      .prepare(
+        `update plan_change_limits
+         set change_count = change_count + 1,
+             updated_at = ?1
+         where user_id = ?2`
+      )
+      .bind(now, userId)
+      .run();
+  }
+}
+
+
 async function createTrainingPlanForUser(
   db: D1Database,
   userId: string,
@@ -997,6 +1140,12 @@ async function createTrainingPlanForUser(
   const allowed = await validateDistanceForMembership(db, userId, input.distance);
   if (!allowed.ok) {
     throw new Error(allowed.message);
+  }
+
+  const changeAllowance = await validatePlanChangeAllowance(db, userId);
+
+  if (!changeAllowance.ok) {
+    throw new Error(changeAllowance.message);
   }
 
   const planId = crypto.randomUUID();
@@ -1085,6 +1234,8 @@ async function createTrainingPlanForUser(
   }
 
   await db.batch(batchStatements);
+
+  await registerPlanChangeUsage(db, userId);
 
   return {
     planId,
@@ -2742,11 +2893,59 @@ app.get("/api/plan/:userId", async (c) => {
       });
     }
 
+    const profile = await c.env.DB
+      .prepare(
+        `select
+           experience_level,
+           weekly_days_available,
+           current_weekly_volume,
+           preferred_goal_type,
+           notes
+         from athlete_profiles
+         where user_id = ?1
+         limit 1`
+      )
+      .bind(userId)
+      .first();
+
+    const goal = await c.env.DB
+      .prepare(
+        `select
+           goal_type,
+           target_distance,
+           target_event_name,
+           target_event_date
+         from goals
+         where user_id = ?1
+         order by created_at desc
+         limit 1`
+      )
+      .bind(userId)
+      .first();
+
+    const planChangeLimit = await c.env.DB
+      .prepare(
+        `select
+           change_count,
+           max_changes_allowed
+         from plan_change_limits
+         where user_id = ?1
+         limit 1`
+      )
+      .bind(userId)
+      .first();
+
     return c.json({
       ok: true,
       plan,
       weeks,
       autoPlan,
+      runnerProfile: profile || null,
+      runnerGoal: goal || null,
+      planChangeLimit: planChangeLimit || {
+        change_count: 0,
+        max_changes_allowed: 1,
+      },
     });
   } catch (error) {
     return c.json(
