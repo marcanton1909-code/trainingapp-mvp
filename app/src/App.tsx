@@ -272,7 +272,6 @@ export default function App() {
   const starterRef = useRef<HTMLDivElement | null>(null);
   const performanceRef = useRef<HTMLDivElement | null>(null);
   const proRef = useRef<HTMLDivElement | null>(null);
-  const authSectionRef = useRef<HTMLDivElement | null>(null);
 
   const planCode =
     entitlements?.source_plan_code || membership?.plan_code || null;
@@ -411,17 +410,6 @@ export default function App() {
     renderPayPalButton(proRef, PAYPAL_PRO_PLAN_ID, "Pro Coach");
   }, [activeTab, paypalReady, authUser?.id]);
 
-  function goToAuthTab(tab: "login" | "register") {
-  setActiveTab(tab);
-
-  window.setTimeout(() => {
-    authSectionRef.current?.scrollIntoView({
-      behavior: "smooth",
-      block: "start",
-    });
-  }, 80);
-}
-
   async function refreshMe(token: string) {
     const res = await fetch(`${API_URL}/api/auth/me`, {
       headers: {
@@ -453,48 +441,19 @@ export default function App() {
   }
 
   async function fetchPlanSilently() {
-  if (!authUser?.id) return;
+    if (!authUser?.id) return;
 
-  try {
-    const res = await fetch(`${API_URL}/api/plan/${authUser.id}`);
-    const data = await res.json();
+    try {
+      const res = await fetch(`${API_URL}/api/plan/${authUser.id}`);
+      const data = await res.json();
 
-    if (res.ok) {
-      setWeeks(data.weeks || []);
-
-      if (data.runnerProfile || data.runnerGoal) {
-        setForm((prev) => ({
-          ...prev,
-          goal:
-            data.runnerGoal?.goal_type ||
-            data.runnerProfile?.preferred_goal_type ||
-            prev.goal,
-          distance:
-            data.runnerGoal?.target_distance ||
-            prev.distance,
-          daysPerWeek:
-            Number(data.runnerProfile?.weekly_days_available || prev.daysPerWeek),
-          level:
-            data.runnerProfile?.experience_level ||
-            prev.level,
-          currentVolumeKm:
-            Number(
-              data.runnerProfile?.current_weekly_volume ??
-                prev.currentVolumeKm
-            ),
-          eventName:
-            data.runnerGoal?.target_event_name ||
-            prev.eventName,
-          eventDate:
-            data.runnerGoal?.target_event_date ||
-            prev.eventDate,
-        }));
+      if (res.ok) {
+        setWeeks(data.weeks || []);
       }
+    } catch {
+      // Sin bloquear UI
     }
-  } catch {
-    // Sin bloquear UI
   }
-}
 
   async function fetchMetricsSilently() {
     if (!authToken) return;
@@ -877,7 +836,7 @@ export default function App() {
       <div className="loading-screen">
         <style>{styles}</style>
         <div className="loading-card">
-          <div className="brand">trAIning</div>
+          <BrandMark />
           <p>Cargando sesión...</p>
         </div>
       </div>
@@ -895,7 +854,7 @@ export default function App() {
         {authUser && (
           <aside className="sidebar">
             <div>
-              <div className="brand">trAIning</div>
+              <BrandMark />
               <div className="brand-subtitle">Running Intelligence</div>
 
               <div className="profile-card">
@@ -938,132 +897,128 @@ export default function App() {
         <main className="main">
           {!authUser && (
             <PublicLandingIntro
-              onLogin={() => goToAuthTab("login")}
-              onCreateAccount={() => goToAuthTab("register")}
+              onLogin={() => setActiveTab("login")}
+              onCreateAccount={() => setActiveTab("register")}
             />
           )}
 
           {!authUser && activeTab === "login" && (
-  <div ref={authSectionRef}>
-    <AuthCard
-      title="Iniciar sesión"
-      subtitle="Entra para consultar tu plan, membresía y métricas."
-    >
-      <form className="form" onSubmit={handleLogin}>
-        <BetaBanner compact />
+            <AuthCard
+              title="Iniciar sesión"
+              subtitle="Entra para consultar tu plan, membresía, Strava y métricas."
+            >
+              <form className="form" onSubmit={handleLogin}>
+                <BetaBanner compact />
 
-        <Field label="Correo">
-          <input
-            type="email"
-            value={loginForm.email}
-            onChange={(e) =>
-              setLoginForm((prev) => ({ ...prev, email: e.target.value }))
-            }
-            required
-            placeholder="tucorreo@email.com"
-          />
-        </Field>
+                <Field label="Correo">
+                  <input
+                    type="email"
+                    value={loginForm.email}
+                    onChange={(e) =>
+                      setLoginForm((prev) => ({ ...prev, email: e.target.value }))
+                    }
+                    required
+                    placeholder="tucorreo@email.com"
+                  />
+                </Field>
 
-        <Field label="Contraseña">
-          <input
-            type="password"
-            value={loginForm.password}
-            onChange={(e) =>
-              setLoginForm((prev) => ({
-                ...prev,
-                password: e.target.value,
-              }))
-            }
-            required
-            placeholder="********"
-          />
-        </Field>
+                <Field label="Contraseña">
+                  <input
+                    type="password"
+                    value={loginForm.password}
+                    onChange={(e) =>
+                      setLoginForm((prev) => ({
+                        ...prev,
+                        password: e.target.value,
+                      }))
+                    }
+                    required
+                    placeholder="********"
+                  />
+                </Field>
 
-        <button className="primary-button" disabled={loginLoading}>
-          {loginLoading ? "Entrando..." : "Iniciar sesión"}
-        </button>
+                <button className="primary-button" disabled={loginLoading}>
+                  {loginLoading ? "Entrando..." : "Iniciar sesión"}
+                </button>
 
-        <button
-          type="button"
-          className="ghost-button"
-          onClick={() => goToAuthTab("register")}
-        >
-          Crear cuenta
-        </button>
-      </form>
-    </AuthCard>
-  </div>
-)}
+                <button
+                  type="button"
+                  className="ghost-button"
+                  onClick={() => setActiveTab("register")}
+                >
+                  Crear cuenta
+                </button>
+              </form>
+            </AuthCard>
+          )}
 
           {!authUser && activeTab === "register" && (
-  <div ref={authSectionRef}>
-    <AuthCard
-      title="Crear cuenta"
-      subtitle="Crea tu usuario para generar tu plan y activar tu membresía."
-    >
-      <form className="form" onSubmit={handleRegister}>
-        <BetaBanner compact />
+            <AuthCard
+              title="Crear cuenta"
+              subtitle="Crea tu usuario para generar tu plan y activar tu membresía."
+            >
+              <form className="form" onSubmit={handleRegister}>
+                <BetaBanner compact />
 
-        <Field label="Nombre">
-          <input
-            value={registerForm.name}
-            onChange={(e) =>
-              setRegisterForm((prev) => ({
-                ...prev,
-                name: e.target.value,
-              }))
-            }
-            required
-            placeholder="Tu nombre"
-          />
-        </Field>
+                <Field label="Nombre">
+                  <input
+                    value={registerForm.name}
+                    onChange={(e) =>
+                      setRegisterForm((prev) => ({
+                        ...prev,
+                        name: e.target.value,
+                      }))
+                    }
+                    required
+                    placeholder="Tu nombre"
+                  />
+                </Field>
 
-        <Field label="Correo">
-          <input
-            type="email"
-            value={registerForm.email}
-            onChange={(e) =>
-              setRegisterForm((prev) => ({
-                ...prev,
-                email: e.target.value,
-              }))
-            }
-            required
-            placeholder="tucorreo@email.com"
-          />
-        </Field>
+                <Field label="Correo">
+                  <input
+                    type="email"
+                    value={registerForm.email}
+                    onChange={(e) =>
+                      setRegisterForm((prev) => ({
+                        ...prev,
+                        email: e.target.value,
+                      }))
+                    }
+                    required
+                    placeholder="tucorreo@email.com"
+                  />
+                </Field>
 
-        <Field label="Contraseña">
-          <input
-            type="password"
-            value={registerForm.password}
-            onChange={(e) =>
-              setRegisterForm((prev) => ({
-                ...prev,
-                password: e.target.value,
-              }))
-            }
-            required
-            minLength={8}
-            placeholder="Mínimo 8 caracteres"
-          />
-        </Field>
+                <Field label="Contraseña">
+                  <input
+                    type="password"
+                    value={registerForm.password}
+                    onChange={(e) =>
+                      setRegisterForm((prev) => ({
+                        ...prev,
+                        password: e.target.value,
+                      }))
+                    }
+                    required
+                    minLength={8}
+                    placeholder="Mínimo 8 caracteres"
+                  />
+                </Field>
 
-        <button className="primary-button" disabled={registerLoading}>
-          {registerLoading ? "Creando..." : "Crear cuenta"}
-        </button>
+                <button className="primary-button" disabled={registerLoading}>
+                  {registerLoading ? "Creando..." : "Crear cuenta"}
+                </button>
 
-        <button
-          type="button"
-          className="ghost-button"
-          onClick={() => goToAuthTab("login")}
-        >
-          Ya tengo cuenta
-        </button>
-      </form>
-    </AuthCard>
-  </div>
-)}
+                <button
+                  type="button"
+                  className="ghost-button"
+                  onClick={() => setActiveTab("login")}
+                >
+                  Ya tengo cuenta
+                </button>
+              </form>
+            </AuthCard>
+          )}
 
           {authUser && activeTab === "home" && (
             <section className="card">
@@ -1666,6 +1621,20 @@ export default function App() {
   );
 }
 
+function BrandMark() {
+  return (
+    <div className="brand-lockup">
+      <div className="brand-icon-wrap">
+        <img className="brand-logo" src="/logo.png" alt="trAIning" />
+      </div>
+      <div>
+        <strong>trAIning</strong>
+        <span>Running Intelligence</span>
+      </div>
+    </div>
+  );
+}
+
 function NavButton({
   active,
   children,
@@ -2039,26 +2008,56 @@ button:disabled {
   box-shadow: 0 24px 70px rgba(0,0,0,0.28);
 }
 
-.brand {
+.brand-lockup {
   display: inline-flex;
-  width: fit-content;
   align-items: center;
-  justify-content: center;
-  padding: 12px 18px;
+  gap: 12px;
+  width: fit-content;
+}
+
+.brand-icon-wrap {
+  width: 52px;
+  height: 52px;
   border-radius: 18px;
-  background: rgba(214,255,77,0.11);
-  color: #D6FF4D;
-  font-weight: 950;
-  letter-spacing: 0.04em;
+  display: grid;
+  place-items: center;
+  background: linear-gradient(135deg, rgba(214,255,77,0.16), rgba(0,230,255,0.10));
   border: 1px solid rgba(214,255,77,0.18);
+  box-shadow: 0 16px 36px rgba(214,255,77,0.08);
+  overflow: hidden;
+}
+
+.brand-logo {
+  width: 38px;
+  height: 38px;
+  object-fit: contain;
+  display: block;
+}
+
+.brand-logo[src="/logo.png"] {
+  color: transparent;
+}
+
+.brand-lockup strong {
+  display: block;
+  color: #D6FF4D;
+  font-size: 18px;
+  font-weight: 950;
+  letter-spacing: -0.02em;
+}
+
+.brand-lockup span {
+  display: block;
+  margin-top: 4px;
+  color: #00E6FF;
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  font-weight: 900;
 }
 
 .brand-subtitle {
-  margin-top: 12px;
-  color: #00E6FF;
-  font-size: 12px;
-  letter-spacing: 0.16em;
-  font-weight: 900;
+  display: none;
 }
 
 .profile-card {
@@ -2143,11 +2142,13 @@ button:disabled {
 .card,
 .auth-card,
 .loading-card {
-  background: linear-gradient(180deg, rgba(17,22,29,0.98), rgba(11,15,20,0.96));
-  border: 1px solid rgba(255,255,255,0.08);
-  border-radius: 30px;
-  padding: 26px;
-  box-shadow: 0 24px 70px rgba(0,0,0,0.34);
+  background:
+    linear-gradient(180deg, rgba(17,22,29,0.98), rgba(11,15,20,0.96)),
+    radial-gradient(circle at top right, rgba(214,255,77,0.08), transparent 35%);
+  border: 1px solid rgba(255,255,255,0.09);
+  border-radius: 34px;
+  padding: 28px;
+  box-shadow: 0 28px 80px rgba(0,0,0,0.38);
 }
 
 .auth-card {
@@ -2155,18 +2156,36 @@ button:disabled {
 }
 
 .public-hero {
-  background: linear-gradient(135deg, rgba(214,255,77,0.12), rgba(0,230,255,0.08), rgba(255,255,255,0.035));
-  border: 1px solid rgba(255,255,255,0.08);
-  border-radius: 34px;
-  padding: 34px;
-  box-shadow: 0 24px 70px rgba(0,0,0,0.34);
+  background:
+    radial-gradient(circle at top left, rgba(214,255,77,0.16), transparent 32%),
+    radial-gradient(circle at bottom right, rgba(0,230,255,0.10), transparent 34%),
+    linear-gradient(135deg, rgba(17,22,29,0.98), rgba(9,13,18,0.94));
+  border: 1px solid rgba(255,255,255,0.10);
+  border-radius: 38px;
+  padding: 38px;
+  box-shadow: 0 30px 90px rgba(0,0,0,0.42);
+  position: relative;
+  overflow: hidden;
+}
+
+.public-hero::after {
+  content: "";
+  position: absolute;
+  inset: auto -80px -120px auto;
+  width: 300px;
+  height: 300px;
+  border-radius: 999px;
+  background: rgba(214,255,77,0.08);
+  filter: blur(70px);
+  pointer-events: none;
 }
 
 .public-hero h1 {
-  font-size: clamp(42px, 6vw, 74px);
-  line-height: 0.98;
-  margin: 18px 0 0;
-  letter-spacing: -0.055em;
+  font-size: clamp(42px, 6vw, 78px);
+  line-height: 0.96;
+  margin: 24px 0 0;
+  letter-spacing: -0.06em;
+  max-width: 780px;
 }
 
 .public-lead {
@@ -2193,10 +2212,11 @@ button:disabled {
 
 .public-feature-grid div,
 .public-beta-note {
-  border-radius: 20px;
-  padding: 16px;
-  background: rgba(255,255,255,0.045);
-  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 24px;
+  padding: 18px;
+  background: rgba(255,255,255,0.052);
+  border: 1px solid rgba(255,255,255,0.09);
+  backdrop-filter: blur(10px);
 }
 
 .public-feature-grid .public-featured-plan {
@@ -2420,14 +2440,24 @@ button:disabled {
 
 .primary-button {
   border: none;
-  background: #D6FF4D;
+  background: linear-gradient(135deg, #D6FF4D, #B9F934);
   color: #050505;
+  box-shadow: 0 14px 30px rgba(214,255,77,0.16);
+}
+
+.primary-button:hover {
+  transform: translateY(-1px);
 }
 
 .ghost-button {
   border: 1px solid rgba(0,230,255,0.22);
   background: rgba(0,230,255,0.12);
   color: #00E6FF;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.04);
+}
+
+.ghost-button:hover {
+  transform: translateY(-1px);
 }
 
 .notice {
@@ -2454,11 +2484,12 @@ button:disabled {
 
 .stat-card,
 .metric-card {
-  border-radius: 22px;
-  padding: 18px;
-  background: rgba(255,255,255,0.04);
-  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 24px;
+  padding: 20px;
+  background: linear-gradient(180deg, rgba(255,255,255,0.052), rgba(255,255,255,0.032));
+  border: 1px solid rgba(255,255,255,0.09);
   min-width: 0;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.04);
 }
 
 .stat-card span,
@@ -2517,7 +2548,9 @@ button:disabled {
 
 .hero-card,
 .connected-panel {
-  background: linear-gradient(135deg, rgba(214,255,77,0.12), rgba(0,230,255,0.08), rgba(255,255,255,0.03));
+  background:
+    linear-gradient(135deg, rgba(214,255,77,0.13), rgba(0,230,255,0.08), rgba(255,255,255,0.035));
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.05);
 }
 
 .pro-card {
@@ -2678,18 +2711,21 @@ button:disabled {
 }
 
 .price-card {
-  border-radius: 24px;
-  padding: 20px;
-  background: rgba(255,255,255,0.04);
-  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 28px;
+  padding: 22px;
+  background: linear-gradient(180deg, rgba(255,255,255,0.055), rgba(255,255,255,0.032));
+  border: 1px solid rgba(255,255,255,0.09);
   display: flex;
   flex-direction: column;
   min-height: 590px;
   overflow: hidden;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.04);
 }
 
 .price-card.featured {
-  box-shadow: 0 0 0 1px rgba(214,255,77,0.20), 0 18px 40px rgba(214,255,77,0.08);
+  background: linear-gradient(180deg, rgba(214,255,77,0.09), rgba(255,255,255,0.035));
+  border-color: rgba(214,255,77,0.24);
+  box-shadow: 0 0 0 1px rgba(214,255,77,0.16), 0 22px 50px rgba(214,255,77,0.08);
 }
 
 .price-card h2 {
@@ -2815,6 +2851,20 @@ button:disabled {
 }
 
 @media (max-width: 920px) {
+  .brand-lockup {
+    width: 100%;
+  }
+
+  .brand-icon-wrap {
+    width: 48px;
+    height: 48px;
+  }
+
+  .brand-logo {
+    width: 35px;
+    height: 35px;
+  }
+
   .public-layout .main {
     grid-template-columns: 1fr;
     min-height: auto;
