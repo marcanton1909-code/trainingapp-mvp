@@ -3006,25 +3006,22 @@ button:disabled {
 }
   /* Brand logo only override */
 .brand-logo-only {
-  width: 150px;
-  height: 150px;
-  border-radius: 36px;
-  padding: 16px;
+  width: 240px;
+  height: auto;
   display: grid;
   place-items: center;
-  background:
-    radial-gradient(circle at 30% 20%, rgba(214,255,77,0.18), transparent 45%),
-    linear-gradient(135deg, rgba(214,255,77,0.10), rgba(0,230,255,0.08));
-  border: 1px solid rgba(214,255,77,0.24);
-  box-shadow:
-    0 24px 56px rgba(0,0,0,0.28),
-    0 0 0 1px rgba(255,255,255,0.04) inset;
-  overflow: hidden;
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  padding: 0;
+  margin: 0;
+  overflow: visible;
 }
 
 .brand-logo-image {
   width: 100%;
-  height: 100%;
+  height: auto;
+  max-height: 130px;
   object-fit: contain;
   display: block;
 }
@@ -3037,15 +3034,39 @@ button:disabled {
 }
 
 .sidebar .brand-logo-only {
-  width: 132px;
-  height: 132px;
-  border-radius: 32px;
+  width: 190px;
+  margin-bottom: 12px;
 }
 
-.public-hero .brand-logo-only,
+.public-hero .brand-logo-only {
+  width: 260px;
+  margin-bottom: 22px;
+}
+
 .auth-card .brand-logo-only,
 .loading-card .brand-logo-only {
+  width: 220px;
   margin-bottom: 18px;
+}
+
+@media (max-width: 920px) {
+  .brand-logo-only {
+    width: 220px;
+  }
+    
+  .brand-logo-image {
+    max-height: 120px;
+  }
+
+  .sidebar .brand-logo-only {
+    width: 185px;
+    margin-bottom: 12px;
+  }
+
+  .public-hero .brand-logo-only {
+    width: 240px;
+    margin-bottom: 20px;
+  }
 }
 
 @media (max-width: 920px) {
