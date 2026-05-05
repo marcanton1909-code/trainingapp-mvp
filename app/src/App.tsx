@@ -272,6 +272,7 @@ export default function App() {
   const starterRef = useRef<HTMLDivElement | null>(null);
   const performanceRef = useRef<HTMLDivElement | null>(null);
   const proRef = useRef<HTMLDivElement | null>(null);
+  const authSectionRef = useRef<HTMLDivElement | null>(null);
 
   const planCode =
     entitlements?.source_plan_code || membership?.plan_code || null;
@@ -409,6 +410,17 @@ export default function App() {
     renderPayPalButton(performanceRef, PAYPAL_PERFORMANCE_PLAN_ID, "Performance");
     renderPayPalButton(proRef, PAYPAL_PRO_PLAN_ID, "Pro Coach");
   }, [activeTab, paypalReady, authUser?.id]);
+
+  function goToAuthTab(tab: "login" | "register") {
+  setActiveTab(tab);
+
+  window.setTimeout(() => {
+    authSectionRef.current?.scrollIntoView({
+      behavior: "smooth",
+      block: "start",
+    });
+  }, 80);
+}
 
   async function refreshMe(token: string) {
     const res = await fetch(`${API_URL}/api/auth/me`, {
@@ -926,128 +938,132 @@ export default function App() {
         <main className="main">
           {!authUser && (
             <PublicLandingIntro
-              onLogin={() => setActiveTab("login")}
-              onCreateAccount={() => setActiveTab("register")}
+              onLogin={() => goToAuthTab("login")}
+              onCreateAccount={() => goToAuthTab("register")}
             />
           )}
 
           {!authUser && activeTab === "login" && (
-            <AuthCard
-              title="Iniciar sesión"
-              subtitle="Entra para consultar tu plan, membresía, Strava y métricas."
-            >
-              <form className="form" onSubmit={handleLogin}>
-                <BetaBanner compact />
+  <div ref={authSectionRef}>
+    <AuthCard
+      title="Iniciar sesión"
+      subtitle="Entra para consultar tu plan, membresía y métricas."
+    >
+      <form className="form" onSubmit={handleLogin}>
+        <BetaBanner compact />
 
-                <Field label="Correo">
-                  <input
-                    type="email"
-                    value={loginForm.email}
-                    onChange={(e) =>
-                      setLoginForm((prev) => ({ ...prev, email: e.target.value }))
-                    }
-                    required
-                    placeholder="tucorreo@email.com"
-                  />
-                </Field>
+        <Field label="Correo">
+          <input
+            type="email"
+            value={loginForm.email}
+            onChange={(e) =>
+              setLoginForm((prev) => ({ ...prev, email: e.target.value }))
+            }
+            required
+            placeholder="tucorreo@email.com"
+          />
+        </Field>
 
-                <Field label="Contraseña">
-                  <input
-                    type="password"
-                    value={loginForm.password}
-                    onChange={(e) =>
-                      setLoginForm((prev) => ({
-                        ...prev,
-                        password: e.target.value,
-                      }))
-                    }
-                    required
-                    placeholder="********"
-                  />
-                </Field>
+        <Field label="Contraseña">
+          <input
+            type="password"
+            value={loginForm.password}
+            onChange={(e) =>
+              setLoginForm((prev) => ({
+                ...prev,
+                password: e.target.value,
+              }))
+            }
+            required
+            placeholder="********"
+          />
+        </Field>
 
-                <button className="primary-button" disabled={loginLoading}>
-                  {loginLoading ? "Entrando..." : "Iniciar sesión"}
-                </button>
+        <button className="primary-button" disabled={loginLoading}>
+          {loginLoading ? "Entrando..." : "Iniciar sesión"}
+        </button>
 
-                <button
-                  type="button"
-                  className="ghost-button"
-                  onClick={() => setActiveTab("register")}
-                >
-                  Crear cuenta
-                </button>
-              </form>
-            </AuthCard>
-          )}
+        <button
+          type="button"
+          className="ghost-button"
+          onClick={() => goToAuthTab("register")}
+        >
+          Crear cuenta
+        </button>
+      </form>
+    </AuthCard>
+  </div>
+)}
 
           {!authUser && activeTab === "register" && (
-            <AuthCard
-              title="Crear cuenta"
-              subtitle="Crea tu usuario para generar tu plan y activar tu membresía."
-            >
-              <form className="form" onSubmit={handleRegister}>
-                <BetaBanner compact />
+  <div ref={authSectionRef}>
+    <AuthCard
+      title="Crear cuenta"
+      subtitle="Crea tu usuario para generar tu plan y activar tu membresía."
+    >
+      <form className="form" onSubmit={handleRegister}>
+        <BetaBanner compact />
 
-                <Field label="Nombre">
-                  <input
-                    value={registerForm.name}
-                    onChange={(e) =>
-                      setRegisterForm((prev) => ({
-                        ...prev,
-                        name: e.target.value,
-                      }))
-                    }
-                    required
-                    placeholder="Tu nombre"
-                  />
-                </Field>
+        <Field label="Nombre">
+          <input
+            value={registerForm.name}
+            onChange={(e) =>
+              setRegisterForm((prev) => ({
+                ...prev,
+                name: e.target.value,
+              }))
+            }
+            required
+            placeholder="Tu nombre"
+          />
+        </Field>
 
-                <Field label="Correo">
-                  <input
-                    type="email"
-                    value={registerForm.email}
-                    onChange={(e) =>
-                      setRegisterForm((prev) => ({
-                        ...prev,
-                        email: e.target.value,
-                      }))
-                    }
-                    required
-                    placeholder="tucorreo@email.com"
-                  />
-                </Field>
+        <Field label="Correo">
+          <input
+            type="email"
+            value={registerForm.email}
+            onChange={(e) =>
+              setRegisterForm((prev) => ({
+                ...prev,
+                email: e.target.value,
+              }))
+            }
+            required
+            placeholder="tucorreo@email.com"
+          />
+        </Field>
 
-                <Field label="Contraseña">
-                  <input
-                    type="password"
-                    value={registerForm.password}
-                    onChange={(e) =>
-                      setRegisterForm((prev) => ({
-                        ...prev,
-                        password: e.target.value,
-                      }))
-                    }
-                    required
-                    minLength={8}
-                    placeholder="Mínimo 8 caracteres"
-                  />
-                </Field>
+        <Field label="Contraseña">
+          <input
+            type="password"
+            value={registerForm.password}
+            onChange={(e) =>
+              setRegisterForm((prev) => ({
+                ...prev,
+                password: e.target.value,
+              }))
+            }
+            required
+            minLength={8}
+            placeholder="Mínimo 8 caracteres"
+          />
+        </Field>
 
-                <button className="primary-button" disabled={registerLoading}>
-                  {registerLoading ? "Creando..." : "Crear cuenta"}
-                </button>
+        <button className="primary-button" disabled={registerLoading}>
+          {registerLoading ? "Creando..." : "Crear cuenta"}
+        </button>
 
-                <button
-                  type="button"
-                  className="ghost-button"
-                  onClick={() => setActiveTab("login")}
-                >
-                  Ya tengo cuenta
-                </button>
-              </form>
-            </AuthCard>
-          )}
+        <button
+          type="button"
+          className="ghost-button"
+          onClick={() => goToAuthTab("login")}
+        >
+          Ya tengo cuenta
+        </button>
+      </form>
+    </AuthCard>
+  </div>
+)}
 
           {authUser && activeTab === "home" && (
             <section className="card">
