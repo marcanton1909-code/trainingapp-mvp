@@ -441,19 +441,48 @@ export default function App() {
   }
 
   async function fetchPlanSilently() {
-    if (!authUser?.id) return;
+  if (!authUser?.id) return;
 
-    try {
-      const res = await fetch(`${API_URL}/api/plan/${authUser.id}`);
-      const data = await res.json();
+  try {
+    const res = await fetch(`${API_URL}/api/plan/${authUser.id}`);
+    const data = await res.json();
 
-      if (res.ok) {
-        setWeeks(data.weeks || []);
+    if (res.ok) {
+      setWeeks(data.weeks || []);
+
+      if (data.runnerProfile || data.runnerGoal) {
+        setForm((prev) => ({
+          ...prev,
+          goal:
+            data.runnerGoal?.goal_type ||
+            data.runnerProfile?.preferred_goal_type ||
+            prev.goal,
+          distance:
+            data.runnerGoal?.target_distance ||
+            prev.distance,
+          daysPerWeek:
+            Number(data.runnerProfile?.weekly_days_available || prev.daysPerWeek),
+          level:
+            data.runnerProfile?.experience_level ||
+            prev.level,
+          currentVolumeKm:
+            Number(
+              data.runnerProfile?.current_weekly_volume ??
+                prev.currentVolumeKm
+            ),
+          eventName:
+            data.runnerGoal?.target_event_name ||
+            prev.eventName,
+          eventDate:
+            data.runnerGoal?.target_event_date ||
+            prev.eventDate,
+        }));
       }
-    } catch {
-      // Sin bloquear UI
     }
+  } catch {
+    // Sin bloquear UI
   }
+}
 
   async function fetchMetricsSilently() {
     if (!authToken) return;
