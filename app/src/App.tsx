@@ -3004,26 +3004,38 @@ button:disabled {
     min-height: auto;
   }
 }
-  /* Brand logo only override */
-.brand-logo-only {
-  width: 240px;
-  height: auto;
-  display: grid;
-  place-items: center;
+  /* Brand logo only override - final */
+.brand-logo-only,
+.brand-lockup.logo-only,
+.brand-icon-wrap {
+  width: auto !important;
+  height: auto !important;
+  min-width: 0 !important;
+  min-height: 0 !important;
+  max-width: none !important;
+  max-height: none !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: flex-start !important;
   background: transparent !important;
-  border: none !important;
+  border: 0 !important;
   box-shadow: none !important;
-  padding: 0;
-  margin: 0;
-  overflow: visible;
+  border-radius: 0 !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  overflow: visible !important;
 }
 
-.brand-logo-image {
-  width: 100%;
-  height: auto;
-  max-height: 130px;
-  object-fit: contain;
-  display: block;
+.brand-logo-image,
+.brand-logo {
+  width: 340px !important;
+  height: auto !important;
+  max-width: 100% !important;
+  max-height: none !important;
+  object-fit: contain !important;
+  display: block !important;
+  transform: scale(1.28);
+  transform-origin: left center;
 }
 
 /* Hide old brand text if an older block still exists somewhere */
@@ -3033,39 +3045,59 @@ button:disabled {
   display: none !important;
 }
 
-.sidebar .brand-logo-only {
-  width: 190px;
-  margin-bottom: 12px;
+.public-hero .brand-logo-only,
+.public-hero .brand-lockup,
+.public-hero .brand-icon-wrap {
+  margin-bottom: 28px !important;
 }
 
-.public-hero .brand-logo-only {
-  width: 260px;
-  margin-bottom: 22px;
+.public-hero .brand-logo-image,
+.public-hero .brand-logo {
+  width: 390px !important;
+  transform: scale(1.35);
+  transform-origin: left center;
 }
 
-.auth-card .brand-logo-only,
-.loading-card .brand-logo-only {
-  width: 220px;
-  margin-bottom: 18px;
+.sidebar .brand-logo-only,
+.sidebar .brand-lockup,
+.sidebar .brand-icon-wrap {
+  margin-bottom: 18px !important;
+}
+
+.sidebar .brand-logo-image,
+.sidebar .brand-logo {
+  width: 280px !important;
+  transform: scale(1.25);
+  transform-origin: left center;
+}
+
+.auth-card .brand-logo-image,
+.loading-card .brand-logo-image,
+.auth-card .brand-logo,
+.loading-card .brand-logo {
+  width: 300px !important;
+  transform: scale(1.25);
+  transform-origin: left center;
 }
 
 @media (max-width: 920px) {
-  .brand-logo-only {
-    width: 220px;
-  }
-    
-  .brand-logo-image {
-    max-height: 120px;
-  }
-
-  .sidebar .brand-logo-only {
-    width: 185px;
-    margin-bottom: 12px;
+  .brand-logo-image,
+  .brand-logo {
+    width: 300px !important;
+    transform: scale(1.25);
+    transform-origin: left center;
   }
 
-  .public-hero .brand-logo-only {
-    width: 240px;
-    margin-bottom: 20px;
+  .public-hero .brand-logo-image,
+  .public-hero .brand-logo {
+    width: 330px !important;
+    transform: scale(1.28);
+  }
+
+  .sidebar .brand-logo-image,
+  .sidebar .brand-logo {
+    width: 260px !important;
+    transform: scale(1.2);
   }
 }
 
