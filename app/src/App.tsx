@@ -1675,14 +1675,8 @@ export default function App() {
 
 function BrandMark() {
   return (
-    <div className="brand-lockup">
-      <div className="brand-icon-wrap">
-        <img className="brand-logo" src="/logo.png" alt="trAIning" />
-      </div>
-      <div>
-        <strong>trAIning</strong>
-        <span>Running Intelligence</span>
-      </div>
+    <div className="brand-lockup logo-only">
+      <img className="brand-logo" src="/logo.png" alt="trAIning" />
     </div>
   );
 }
@@ -2063,51 +2057,30 @@ button:disabled {
 }
 
 .brand-lockup {
-  display: inline-flex;
+  display: flex;
   align-items: center;
-  gap: 12px;
+  justify-content: center;
   width: fit-content;
 }
 
-.brand-icon-wrap {
-  width: 52px;
-  height: 52px;
-  border-radius: 18px;
-  display: grid;
-  place-items: center;
-  background: linear-gradient(135deg, rgba(214,255,77,0.16), rgba(0,230,255,0.10));
-  border: 1px solid rgba(214,255,77,0.18);
-  box-shadow: 0 16px 36px rgba(214,255,77,0.08);
+.brand-lockup.logo-only {
+  width: 112px;
+  height: 112px;
+  border-radius: 30px;
+  padding: 12px;
+  background: linear-gradient(135deg, rgba(214,255,77,0.12), rgba(0,230,255,0.08));
+  border: 1px solid rgba(214,255,77,0.22);
+  box-shadow:
+    0 22px 50px rgba(0,0,0,0.26),
+    0 0 0 1px rgba(255,255,255,0.035) inset;
   overflow: hidden;
 }
 
 .brand-logo {
-  width: 38px;
-  height: 38px;
+  width: 100%;
+  height: 100%;
   object-fit: contain;
   display: block;
-}
-
-.brand-logo[src="/logo.png"] {
-  color: transparent;
-}
-
-.brand-lockup strong {
-  display: block;
-  color: #D6FF4D;
-  font-size: 18px;
-  font-weight: 950;
-  letter-spacing: -0.02em;
-}
-
-.brand-lockup span {
-  display: block;
-  margin-top: 4px;
-  color: #00E6FF;
-  font-size: 11px;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  font-weight: 900;
 }
 
 .brand-subtitle {
@@ -2906,7 +2879,7 @@ button:disabled {
 
 @media (max-width: 920px) {
   .brand-lockup {
-    width: 100%;
+    width: fit-content;
   }
 
   .brand-icon-wrap {
@@ -3029,6 +3002,64 @@ button:disabled {
 
   .price-card {
     min-height: auto;
+  }
+}
+  /* Brand logo only override */
+.brand-logo-only {
+  width: 150px;
+  height: 150px;
+  border-radius: 36px;
+  padding: 16px;
+  display: grid;
+  place-items: center;
+  background:
+    radial-gradient(circle at 30% 20%, rgba(214,255,77,0.18), transparent 45%),
+    linear-gradient(135deg, rgba(214,255,77,0.10), rgba(0,230,255,0.08));
+  border: 1px solid rgba(214,255,77,0.24);
+  box-shadow:
+    0 24px 56px rgba(0,0,0,0.28),
+    0 0 0 1px rgba(255,255,255,0.04) inset;
+  overflow: hidden;
+}
+
+.brand-logo-image {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+
+/* Hide old brand text if an older block still exists somewhere */
+.brand-lockup strong,
+.brand-lockup span,
+.brand-subtitle {
+  display: none !important;
+}
+
+.sidebar .brand-logo-only {
+  width: 132px;
+  height: 132px;
+  border-radius: 32px;
+}
+
+.public-hero .brand-logo-only,
+.auth-card .brand-logo-only,
+.loading-card .brand-logo-only {
+  margin-bottom: 18px;
+}
+
+@media (max-width: 920px) {
+  .brand-logo-only {
+    width: 128px;
+    height: 128px;
+    border-radius: 32px;
+    padding: 14px;
+  }
+
+  .sidebar .brand-logo-only {
+    width: 112px;
+    height: 112px;
+    border-radius: 28px;
   }
 }
 `;
