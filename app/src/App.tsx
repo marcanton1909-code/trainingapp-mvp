@@ -8,14 +8,16 @@ const PAYPAL_PERFORMANCE_PLAN_ID = "P-6GE16555S80643802NH5DTZA";
 const PAYPAL_PRO_PLAN_ID = "P-7J192125FH642021ANH5DTZA";
 
 const AUTH_TOKEN_KEY = "trainingapp_auth_token";
+const STRAVA_REVIEW_QUERY_PARAM = "strava_review";
+const STRAVA_PUBLIC_VISIBLE = false;
 
 const BETA_COPY = {
   badge: "Acceso anticipado",
   title: "Beta pagada activa",
   short:
-    "Genera tu plan de running hoy. Conecta Strava para medir tu progreso y preparar futuros ajustes inteligentes.",
+    "Genera tu plan de running hoy y empieza a medir tu progreso desde el dashboard.",
   long:
-    "Estás usando una versión de acceso anticipado. El plan actual se genera con lógica estándar por objetivo, distancia, nivel, disponibilidad y fecha. La capa de ajustes inteligentes con IA se liberará progresivamente usando tu historial de entrenamiento.",
+    "Estás usando una versión de acceso anticipado. El plan actual se genera con lógica estándar por objetivo, distancia, nivel, disponibilidad y fecha. La capa de ajustes inteligentes se liberará progresivamente usando tu historial de entrenamiento dentro de la app.",
 };
 
 type TabMode =
@@ -204,6 +206,11 @@ function hasAnyMetric(metrics: MetricsResponse | null) {
   );
 }
 
+function isStravaReviewEnabled() {
+  if (typeof window === "undefined") return false;
+  return new URLSearchParams(window.location.search).get(STRAVA_REVIEW_QUERY_PARAM) === "1";
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<TabMode>("login");
   const [authLoading, setAuthLoading] = useState(true);
@@ -261,6 +268,9 @@ export default function App() {
     entitlements?.source_plan_code || membership?.plan_code || null;
   const hasActiveMembership = Boolean(entitlements?.has_active_membership);
   const canConnectStrava = Boolean(entitlements?.can_connect_strava);
+  const stravaReviewMode = isStravaReviewEnabled();
+  const showStravaIntegration = STRAVA_PUBLIC_VISIBLE || stravaReviewMode;
+  const canShowStravaActions = canConnectStrava && showStravaIntegration;
   const isProCoach = planCode === "pro_coach";
   const allowedDistances = getAllowedDistances(planCode);
 
@@ -979,7 +989,7 @@ export default function App() {
               <Header
                 badge="Dashboard"
                 title="Tu entrenamiento"
-                subtitle="Genera tu plan, conecta Strava y mide tu progreso desde una sola vista."
+                subtitle="Genera tu plan, consulta tu semana visible y mide tu progreso desde una sola vista."
               />
 
               <BetaBanner />
@@ -1008,11 +1018,19 @@ export default function App() {
                       : "Sin sesiones"
                   }
                 />
-                <StatCard
-                  label="Strava"
-                  value={strava.connected ? "Conectado" : "No conectado"}
-                  hint={canConnectStrava ? "Disponible en beta" : "Requiere Performance"}
-                />
+                {showStravaIntegration ? (
+                  <StatCard
+                    label="Compatible with Strava"
+                    value={strava.connected ? "Conectado" : "No conectado"}
+                    hint={canConnectStrava ? "Disponible para revisión" : "Requiere Performance"}
+                  />
+                ) : (
+                  <StatCard
+                    label="Progreso"
+                    value={mainMetric ? `${mainMetric.totalDistanceKm} km` : "Activo"}
+                    hint="Dashboard en evolución"
+                  />
+                )}
               </div>
 
               <div className="split-grid">
@@ -1042,17 +1060,19 @@ export default function App() {
                 </div>
 
                 <div className="hero-card">
-                  <span className="chip lime">Métricas reales</span>
-                  <h2>{strava.connected ? "Strava conectado" : "Conecta Strava"}</h2>
+                  <span className="chip lime">Progreso</span>
+                  <h2>{showStravaIntegration ? (strava.connected ? "Strava conectado" : "Compatible with Strava") : "Historial y métricas"}</h2>
                   <p>
-                    {strava.connected && mainMetric
+                    {showStravaIntegration && strava.connected && mainMetric
                       ? `${mainMetric.totalDistanceKm} km en 28 días · ${mainMetric.activityCount} actividades · ${formatPace(mainMetric.avgPaceSecondsPerKm)}`
-                      : strava.connected
+                      : showStravaIntegration && strava.connected
                       ? "Ya conectaste Strava. Sincroniza para actualizar tus datos."
-                      : "Performance y Pro Coach pueden conectar Strava para guardar historial y preparar futuros ajustes inteligentes."}
+                      : showStravaIntegration
+                      ? "Performance y Pro Coach son compatibles con Strava para guardar historial y preparar futuros ajustes inteligentes."
+                      : "El dashboard irá mostrando tu progreso, plan activo, sesiones y métricas disponibles conforme avances dentro de la app."}
                   </p>
 
-                  {!canConnectStrava && (
+                  {showStravaIntegration && !canConnectStrava && (
                     <button
                       className="ghost-button"
                       onClick={() => setActiveTab("membership")}
@@ -1061,23 +1081,23 @@ export default function App() {
                     </button>
                   )}
 
-                  {canConnectStrava && !strava.connected && (
+                  {canShowStravaActions && !strava.connected && (
                     <button
                       className="ghost-button"
                       disabled={stravaLoading}
                       onClick={connectStrava}
                     >
-                      {stravaLoading ? "Conectando..." : "Conectar Strava"}
+                      {stravaLoading ? "Conectando..." : "Connect with Strava"}
                     </button>
                   )}
 
-                  {canConnectStrava && strava.connected && (
+                  {canShowStravaActions && strava.connected && (
                     <button
                       className="ghost-button"
                       disabled={stravaLoading}
                       onClick={syncStrava}
                     >
-                      {stravaLoading ? "Sincronizando..." : "Sincronizar Strava"}
+                      {stravaLoading ? "Sincronizando..." : "Sincronizar"}
                     </button>
                   )}
                 </div>
@@ -1311,34 +1331,47 @@ export default function App() {
             <section className="card">
               <Header
                 badge="Métricas"
-                title="Progreso real"
-                subtitle="Sincroniza Strava para construir historial y preparar futuros ajustes inteligentes."
+                title="Progreso"
+                subtitle={
+                  showStravaIntegration
+                    ? "Sincroniza actividades para construir historial y preparar futuros ajustes inteligentes."
+                    : "Consulta el avance de tu plan. Las métricas avanzadas se activarán progresivamente."
+                }
               />
 
-              {!canConnectStrava && (
+              {!showStravaIntegration && (
                 <EmptyState
-                  title="Strava no está incluido en Starter"
-                  text="Cambia a Performance para conectar Strava y medir actividades reales."
+                  title="Métricas avanzadas en preparación"
+                  text="Por ahora puedes consultar tu plan y sesiones. Las métricas avanzadas se activarán progresivamente para usuarios autorizados."
+                  button="Ver mi plan"
+                  onClick={() => setActiveTab("plan")}
+                />
+              )}
+
+              {showStravaIntegration && !canConnectStrava && (
+                <EmptyState
+                  title="Compatible with Strava no está incluido en Starter"
+                  text="Cambia a Performance para conectar tu cuenta autorizada y medir actividades reales."
                   button="Ver planes"
                   onClick={() => setActiveTab("membership")}
                 />
               )}
 
-              {canConnectStrava && !strava.connected && (
+              {canShowStravaActions && !strava.connected && (
                 <EmptyState
-                  title="Conecta Strava"
-                  text="Autoriza tu cuenta para sincronizar actividades. Strava está activo en beta para Performance y Pro Coach."
-                  button={stravaLoading ? "Conectando..." : "Conectar Strava"}
+                  title="Compatible with Strava"
+                  text="Autoriza tu cuenta para sincronizar actividades. Esta integración está disponible solo para revisión y usuarios autorizados."
+                  button={stravaLoading ? "Conectando..." : "Connect with Strava"}
                   onClick={connectStrava}
                 />
               )}
 
-              {canConnectStrava && strava.connected && (
+              {canShowStravaActions && strava.connected && (
                 <>
                   <div className="connected-panel">
                     <div>
-                      <span className="chip cyan">Strava conectado</span>
-                      <h2>Historial activo</h2>
+                      <span className="chip cyan">Compatible with Strava</span>
+                      <h2>Historial autorizado activo</h2>
                       <p>
                         {hasAnyMetric(metrics)
                           ? "Tus métricas ya están disponibles. Este historial será la base para futuros ajustes inteligentes."
@@ -1374,6 +1407,7 @@ export default function App() {
               />
 
               <BetaBanner />
+              {showStravaIntegration && <StravaReviewNotice />}
 
               {paypalLoading && <div className="notice">Cargando PayPal...</div>}
               {paypalError && <div className="notice error">{paypalError}</div>}
@@ -1398,11 +1432,17 @@ export default function App() {
                   title="Performance"
                   price="$249 MXN"
                   tag="Recomendado"
-                  description="Entrena con plan completo, Strava y métricas reales hasta maratón."
+                  description={
+                    showStravaIntegration
+                      ? "Entrena con plan completo, integración compatible con Strava y métricas reales hasta maratón."
+                      : "Entrena con plan completo, dashboard avanzado y métricas progresivas hasta maratón."
+                  }
                   featured
                   features={[
                     "Planes 5K a 42K",
-                    "Conexión con Strava en beta",
+                    showStravaIntegration
+                      ? "Compatible with Strava en revisión"
+                      : "Métricas avanzadas próximamente",
                     "Métricas reales",
                     "Dashboard completo",
                     "Historial para futura IA",
@@ -1441,10 +1481,12 @@ export default function App() {
                 <StatCard label="Correo" value={authUser.email} />
                 <StatCard label="Plan" value={getPlanLabel(planCode)} />
                 <StatCard label="Estado" value={getStatusLabel(membership?.status)} />
-                <StatCard
-                  label="Strava"
-                  value={strava.connected ? "Conectado" : "No conectado"}
-                />
+                {showStravaIntegration && (
+                  <StatCard
+                    label="Compatible with Strava"
+                    value={strava.connected ? "Conectado" : "No conectado"}
+                  />
+                )}
                 <StatCard
                   label="Premium"
                   value={isProCoach ? "Activo" : "No activo"}
@@ -1561,9 +1603,7 @@ function PublicLandingIntro({
       <span className="chip lime">{BETA_COPY.badge}</span>
       <h1>Planes de running listos para entrenar hoy</h1>
       <p className="public-lead">
-        Crea tu plan por objetivo, distancia, nivel y disponibilidad. Conecta Strava
-        en Performance o Pro Coach para medir tu progreso y preparar futuros ajustes
-        inteligentes.
+        Crea tu plan por objetivo, distancia, nivel y disponibilidad. Las métricas avanzadas y conexiones externas se activarán progresivamente para usuarios autorizados.
       </p>
 
       <div className="public-actions">
@@ -1589,7 +1629,7 @@ function PublicLandingIntro({
           <span className="plan-tag">Recomendado</span>
           <strong>Performance</strong>
           <b>$249 MXN / mes</b>
-          <span>Hasta 42K, conexión con Strava y métricas reales.</span>
+          <span>Hasta 42K, dashboard avanzado y métricas progresivas.</span>
           <button className="public-plan-button" onClick={onCreateAccount}>
             Comprar Performance
           </button>
@@ -1639,6 +1679,19 @@ function BetaBanner({ compact = false }: { compact?: boolean }) {
         <strong>{BETA_COPY.title}</strong>
         <p>{compact ? BETA_COPY.short : BETA_COPY.long}</p>
       </div>
+    </div>
+  );
+}
+
+function StravaReviewNotice() {
+  return (
+    <div className="strava-review-notice">
+      <strong>Compatible with Strava</strong>
+      <p>
+        trAIning is compatible with Strava. trAIning is not developed, sponsored,
+        endorsed, or approved by Strava. This integration is shown only for
+        review and authorized access while connected athlete capacity is pending.
+      </p>
     </div>
   );
 }
@@ -2178,6 +2231,28 @@ button:disabled {
   color: rgba(255,255,255,0.72);
   line-height: 1.55;
   font-size: 14px;
+}
+
+.strava-review-notice {
+  border-radius: 18px;
+  padding: 14px 16px;
+  margin: 14px 0;
+  background: rgba(255,255,255,0.035);
+  border: 1px solid rgba(255,255,255,0.08);
+}
+
+.strava-review-notice strong {
+  display: block;
+  color: #FC4C02;
+  font-size: 13px;
+  font-weight: 950;
+}
+
+.strava-review-notice p {
+  margin: 6px 0 0;
+  color: rgba(255,255,255,0.62);
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .form {
