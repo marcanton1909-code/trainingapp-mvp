@@ -287,6 +287,8 @@ export default function App() {
   const performanceRef = useRef<HTMLDivElement | null>(null);
   const proRef = useRef<HTMLDivElement | null>(null);
 
+  const authSectionRef = useRef<HTMLDivElement | null>(null);
+
   const planCode =
     entitlements?.source_plan_code || membership?.plan_code || null;
   const hasActiveMembership = Boolean(entitlements?.has_active_membership);
@@ -433,6 +435,17 @@ export default function App() {
     renderPayPalButton(proRef, PAYPAL_PRO_PLAN_ID, "Pro Coach");
   }, [activeTab, paypalReady, authUser?.id]);
 
+  function goToAuthTab(tab: "login" | "register") {
+    setActiveTab(tab);
+
+    window.setTimeout(() => {
+      authSectionRef.current?.scrollIntoView({
+        behavior: "smooth",
+        block: "start",
+      });
+    }, 80);
+  }
+
   async function refreshMe(token: string) {
     const res = await fetch(`${API_URL}/api/auth/me`, {
       headers: {
@@ -464,49 +477,45 @@ export default function App() {
   }
 
   async function fetchPlanSilently() {
-  if (!authUser?.id) return;
+    if (!authUser?.id) return;
 
-  try {
-    const res = await fetch(`${API_URL}/api/plan/${authUser.id}`);
-    const data = await res.json();
+    try {
+      const res = await fetch(`${API_URL}/api/plan/${authUser.id}`);
+      const data = await res.json();
 
-    if (res.ok) {
-      setWeeks(data.weeks || []);
+      if (res.ok) {
+        setWeeks(data.weeks || []);
 
-      const savedDistance =
-        normalizeDistance(data.runnerGoal?.target_distance) ||
-        normalizeDistance(data.plan?.target_distance) ||
-        normalizeDistance(data.plan?.distance) ||
-        normalizeDistance(data.plan?.goal_distance);
+        const savedDistance =
+          normalizeDistance(data.runnerGoal?.target_distance) ||
+          normalizeDistance(data.plan?.target_distance) ||
+          normalizeDistance(data.plan?.distance) ||
+          normalizeDistance(data.plan?.goal_distance);
 
-      if (data.runnerProfile || data.runnerGoal || savedDistance) {
-        setForm((prev) => ({
-          ...prev,
-          goal:
-            data.runnerGoal?.goal_type ||
-            data.runnerProfile?.preferred_goal_type ||
-            prev.goal,
-          distance: savedDistance || prev.distance,
-          daysPerWeek: Number(
-            data.runnerProfile?.weekly_days_available || prev.daysPerWeek
-          ),
-          level: data.runnerProfile?.experience_level || prev.level,
-          currentVolumeKm: Number(
-            data.runnerProfile?.current_weekly_volume ?? prev.currentVolumeKm
-          ),
-          eventName:
-            data.runnerGoal?.target_event_name ||
-            prev.eventName,
-          eventDate:
-            data.runnerGoal?.target_event_date ||
-            prev.eventDate,
-        }));
+        if (data.runnerProfile || data.runnerGoal || savedDistance) {
+          setForm((prev) => ({
+            ...prev,
+            goal:
+              data.runnerGoal?.goal_type ||
+              data.runnerProfile?.preferred_goal_type ||
+              prev.goal,
+            distance: savedDistance || prev.distance,
+            daysPerWeek: Number(
+              data.runnerProfile?.weekly_days_available || prev.daysPerWeek
+            ),
+            level: data.runnerProfile?.experience_level || prev.level,
+            currentVolumeKm: Number(
+              data.runnerProfile?.current_weekly_volume ?? prev.currentVolumeKm
+            ),
+            eventName: data.runnerGoal?.target_event_name || prev.eventName,
+            eventDate: data.runnerGoal?.target_event_date || prev.eventDate,
+          }));
+        }
       }
+    } catch {
+      // Sin bloquear UI
     }
-  } catch {
-    // Sin bloquear UI
   }
-}
 
   async function fetchMetricsSilently() {
     if (!authToken) return;
@@ -949,13 +958,14 @@ export default function App() {
         <main className="main">
           {!authUser && (
             <PublicLandingIntro
-              onLogin={() => setActiveTab("login")}
-              onCreateAccount={() => setActiveTab("register")}
+              onLogin={() => goToAuthTab("login")}
+              onCreateAccount={() => goToAuthTab("register")}
             />
           )}
 
           {!authUser && activeTab === "login" && (
             <AuthCard
+              anchorRef={authSectionRef}
               title="Iniciar sesión"
               subtitle="Entra para consultar tu plan, membresía, Strava y métricas."
             >
@@ -996,7 +1006,7 @@ export default function App() {
                 <button
                   type="button"
                   className="ghost-button"
-                  onClick={() => setActiveTab("register")}
+                  onClick={() => goToAuthTab("register")}
                 >
                   Crear cuenta
                 </button>
@@ -1006,6 +1016,7 @@ export default function App() {
 
           {!authUser && activeTab === "register" && (
             <AuthCard
+              anchorRef={authSectionRef}
               title="Crear cuenta"
               subtitle="Crea tu usuario para generar tu plan y activar tu membresía."
             >
@@ -1064,7 +1075,7 @@ export default function App() {
                 <button
                   type="button"
                   className="ghost-button"
-                  onClick={() => setActiveTab("login")}
+                  onClick={() => goToAuthTab("login")}
                 >
                   Ya tengo cuenta
                 </button>
@@ -1701,13 +1712,15 @@ function AuthCard({
   title,
   subtitle,
   children,
+  anchorRef,
 }: {
   title: string;
   subtitle: string;
   children: React.ReactNode;
+  anchorRef?: React.RefObject<HTMLDivElement | null>;
 }) {
   return (
-    <section className="auth-card">
+    <section ref={anchorRef} className="auth-card">
       <span className="chip cyan">Acceso</span>
       <h1>{title}</h1>
       <p>{subtitle}</p>
