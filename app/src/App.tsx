@@ -1126,6 +1126,7 @@ export default function App() {
 
           {!authUser && activeTab === "login" && (
             <AuthCard
+              anchorRef={authSectionRef}
               title="Iniciar sesión"
               subtitle="Entra para consultar tu plan, membresía, Strava y métricas."
             >
@@ -1176,6 +1177,7 @@ export default function App() {
 
           {!authUser && activeTab === "register" && (
             <AuthCard
+              anchorRef={authSectionRef}
               title="Crear cuenta"
               subtitle="Crea tu usuario para generar tu plan y activar tu membresía."
             >
@@ -1889,13 +1891,15 @@ function AuthCard({
   title,
   subtitle,
   children,
+  anchorRef,
 }: {
   title: string;
   subtitle: string;
   children: React.ReactNode;
+  anchorRef?: React.RefObject<HTMLDivElement | null>;
 }) {
   return (
-    <section className="auth-card">
+    <section ref={anchorRef} className="auth-card">
       <span className="chip cyan">Acceso</span>
       <h1>{title}</h1>
       <p>{subtitle}</p>
