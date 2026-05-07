@@ -1600,7 +1600,9 @@ export default function App() {
                             <label className="pace-field">
                               <span>Ritmo por km</span>
                               <input
-                                inputMode="numeric"
+                                type="text"
+                                inputMode="text"
+                                autoComplete="off"
                                 placeholder="5:45"
                                 value={sessionEntry?.pace || ""}
                                 onChange={(e) =>
