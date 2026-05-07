@@ -110,6 +110,26 @@ type MetricsResponse = {
   days56: MetricsWindow | null;
 };
 
+type ManualSessionEntry = {
+  completed: boolean;
+  pace: string;
+  completedAt?: string;
+};
+
+type ManualMetrics = {
+  totalSessions: number;
+  completedSessions: number;
+  plannedDistanceKm: number;
+  completedDistanceKm: number;
+  completionRate: number;
+  avgPaceSecondsPerKm: number | null;
+  totalEstimatedSeconds: number;
+  longRunKm: number;
+  sessionsWithPace: number;
+  missingPace: number;
+  trainingLoadScore: number;
+};
+
 declare global {
   interface Window {
     paypal?: {
@@ -198,6 +218,23 @@ function getAllowedDistances(planCode?: string | null) {
   return ["5K", "10K", "15K"];
 }
 
+function normalizeDistance(value?: string | number | null) {
+  if (value === null || value === undefined) return null;
+
+  const clean = String(value)
+  .trim()
+  .toUpperCase()
+  .replace(/\s+/g, "");
+
+  if (clean === "5" || clean === "5K" || clean === "5KM") return "5K";
+  if (clean === "10" || clean === "10K" || clean === "10KM") return "10K";
+  if (clean === "15" || clean === "15K" || clean === "15KM") return "15K";
+  if (clean === "21" || clean === "21K" || clean === "21KM") return "21K";
+  if (clean === "42" || clean === "42K" || clean === "42KM") return "42K";
+
+  return clean;
+}
+
 function hasAnyMetric(metrics: MetricsResponse | null) {
   return Boolean(
     metrics?.days7?.activityCount ||
@@ -214,23 +251,111 @@ function getSessionKey(session: Session, weekNumber: number, index: number) {
   return session.id || `week-${weekNumber}-session-${index}-${session.title}`;
 }
 
+function getSessionDistanceKm(session: Session) {
+  return Number(session.distance_target || 0);
+}
+
+function parsePaceToSeconds(value?: string | null) {
+  if (!value) return null;
+
+  const clean = String(value).trim().replace("/km", "");
+  const parts = clean.split(":");
+
+  if (parts.length === 1) {
+    const minutes = Number(parts[0]);
+    if (!Number.isFinite(minutes) || minutes <= 0) return null;
+    return Math.round(minutes * 60);
+  }
+
+  const minutes = Number(parts[0]);
+  const seconds = Number(parts[1]);
+
+  if (
+    !Number.isFinite(minutes) ||
+    !Number.isFinite(seconds) ||
+    minutes < 0 ||
+    seconds < 0 ||
+    seconds >= 60
+  ) {
+    return null;
+  }
+
+  return Math.round(minutes * 60 + seconds);
+}
+
+function normalizePaceInput(value: string) {
+  return value.replace(/[^0-9:]/g, "").slice(0, 5);
+}
+
+function calculateManualMetrics(
+  sessions: Session[],
+  completedSessions: Record<string, ManualSessionEntry>,
+  weekNumber: number
+): ManualMetrics {
+  let completedCount = 0;
+  let completedDistanceKm = 0;
+  let totalEstimatedSeconds = 0;
+  let weightedPaceSeconds = 0;
+  let weightedDistanceForPace = 0;
+  let longRunKm = 0;
+  let sessionsWithPace = 0;
+
+  const plannedDistanceKm = sessions.reduce(
+    (sum, session) => sum + getSessionDistanceKm(session),
+    0
+  );
+
+  sessions.forEach((session, index) => {
+    const key = getSessionKey(session, weekNumber, index);
+    const entry = completedSessions[key];
+    const distanceKm = getSessionDistanceKm(session);
+
+    if (!entry?.completed) return;
+
+    completedCount += 1;
+    completedDistanceKm += distanceKm;
+    longRunKm = Math.max(longRunKm, distanceKm);
+
+    const paceSeconds = parsePaceToSeconds(entry.pace);
+    if (paceSeconds && distanceKm > 0) {
+      sessionsWithPace += 1;
+      weightedPaceSeconds += paceSeconds * distanceKm;
+      weightedDistanceForPace += distanceKm;
+      totalEstimatedSeconds += paceSeconds * distanceKm;
+    }
+  });
+
+  const avgPaceSecondsPerKm =
+    weightedDistanceForPace > 0
+      ? Math.round(weightedPaceSeconds / weightedDistanceForPace)
+      : null;
+
+  const completionRate = sessions.length
+    ? Math.round((completedCount / sessions.length) * 100)
+    : 0;
+
+  const trainingLoadScore = Math.round(
+    completedDistanceKm * 10 + completedCount * 4 + completionRate * 0.3
+  );
+
+  return {
+    totalSessions: sessions.length,
+    completedSessions: completedCount,
+    plannedDistanceKm: Math.round(plannedDistanceKm * 10) / 10,
+    completedDistanceKm: Math.round(completedDistanceKm * 10) / 10,
+    completionRate,
+    avgPaceSecondsPerKm,
+    totalEstimatedSeconds: Math.round(totalEstimatedSeconds),
+    longRunKm: Math.round(longRunKm * 10) / 10,
+    sessionsWithPace,
+    missingPace: Math.max(0, completedCount - sessionsWithPace),
+    trainingLoadScore,
+  };
+}
+
 function isStravaReviewEnabled() {
   if (typeof window === "undefined") return false;
   return new URLSearchParams(window.location.search).get(STRAVA_REVIEW_QUERY_PARAM) === "1";
-}
-
-function normalizeDistance(value?: string | null) {
-  if (!value) return null;
-
-  const clean = String(value).trim().toUpperCase().replace(" ", "");
-
-  if (clean === "5" || clean === "5K" || clean === "5KM") return "5K";
-  if (clean === "10" || clean === "10K" || clean === "10KM") return "10K";
-  if (clean === "15" || clean === "15K" || clean === "15KM") return "15K";
-  if (clean === "21" || clean === "21K" || clean === "21KM") return "21K";
-  if (clean === "42" || clean === "42K" || clean === "42KM") return "42K";
-
-  return clean;
 }
 
 export default function App() {
@@ -271,7 +396,7 @@ export default function App() {
   const [weeks, setWeeks] = useState<Week[]>([]);
   const [metrics, setMetrics] = useState<MetricsResponse | null>(null);
   const [selectedSession, setSelectedSession] = useState<Session | null>(null);
-  const [completedSessions, setCompletedSessions] = useState<Record<string, boolean>>({});
+  const [completedSessions, setCompletedSessions] = useState<Record<string, ManualSessionEntry>>({});
   const [result, setResult] = useState("");
 
   const [loading, setLoading] = useState(false);
@@ -286,7 +411,6 @@ export default function App() {
   const starterRef = useRef<HTMLDivElement | null>(null);
   const performanceRef = useRef<HTMLDivElement | null>(null);
   const proRef = useRef<HTMLDivElement | null>(null);
-
   const authSectionRef = useRef<HTMLDivElement | null>(null);
 
   const planCode =
@@ -304,8 +428,17 @@ export default function App() {
   const highlightedSession = currentSessions[0] || null;
   const mainMetric = metrics?.days28 || metrics?.days7 || null;
   const completedThisWeek = currentSessions.filter((session, index) =>
-    completedSessions[getSessionKey(session, currentWeek?.week_number || 1, index)]
+    completedSessions[getSessionKey(session, currentWeek?.week_number || 1, index)]?.completed
   ).length;
+  const manualMetrics = useMemo(
+    () =>
+      calculateManualMetrics(
+        currentSessions,
+        completedSessions,
+        currentWeek?.week_number || 1
+      ),
+    [currentSessions, completedSessions, currentWeek?.week_number]
+  );
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -379,22 +512,22 @@ export default function App() {
   }, [authUser?.id, authToken]);
 
   useEffect(() => {
-  setForm((prev) => {
-    const normalized = normalizeDistance(prev.distance) || prev.distance;
+    setForm((prev) => {
+      const normalized = normalizeDistance(prev.distance) || prev.distance;
 
-    if (allowedDistances.includes(normalized)) {
+      if (allowedDistances.includes(normalized)) {
+        return {
+          ...prev,
+          distance: normalized,
+        };
+      }
+
       return {
         ...prev,
-        distance: normalized,
+        distance: allowedDistances[0] || "5K",
       };
-    }
-
-    return {
-      ...prev,
-      distance: allowedDistances[0] || "5K",
-    };
-  });
-}, [planCode, allowedDistances.join(",")]);
+    });
+  }, [planCode, allowedDistances.join(",")]);
 
   useEffect(() => {
     async function initPayPal() {
@@ -846,9 +979,36 @@ export default function App() {
     if (!authUser?.id) return;
 
     const key = getSessionKey(session, weekNumber, index);
+    const current = completedSessions[key] || { completed: false, pace: "" };
     const next = {
       ...completedSessions,
-      [key]: !completedSessions[key],
+      [key]: {
+        ...current,
+        completed: !current.completed,
+        completedAt: !current.completed ? new Date().toISOString() : current.completedAt,
+      },
+    };
+
+    setCompletedSessions(next);
+    localStorage.setItem(getCompletedSessionsKey(authUser.id), JSON.stringify(next));
+  }
+
+  function updateSessionPace(
+    session: Session,
+    weekNumber: number,
+    index: number,
+    value: string
+  ) {
+    if (!authUser?.id) return;
+
+    const key = getSessionKey(session, weekNumber, index);
+    const current = completedSessions[key] || { completed: false, pace: "" };
+    const next = {
+      ...completedSessions,
+      [key]: {
+        ...current,
+        pace: normalizePaceInput(value),
+      },
     };
 
     setCompletedSessions(next);
@@ -917,15 +1077,16 @@ export default function App() {
           <aside className="sidebar">
             <div>
               <BrandMark />
+              <div className="brand-subtitle">Running Intelligence</div>
 
-<div className="profile-card">
-  <strong>{authUser.name}</strong>
-  <span>{authUser.email}</span>
-  <em>{getPlanLabel(planCode)}</em>
-  <button className="mobile-logout-inline" onClick={handleLogout}>
-    Cerrar sesión
-  </button>
-</div>
+              <div className="profile-card">
+                <strong>{authUser.name}</strong>
+                <span>{authUser.email}</span>
+                <em>{getPlanLabel(planCode)}</em>
+                <button className="mobile-logout-inline" onClick={handleLogout}>
+                  Cerrar sesión
+                </button>
+              </div>
 
               <nav className="nav">
                 <NavButton active={activeTab === "home"} onClick={() => setActiveTab("home")}>
@@ -958,14 +1119,13 @@ export default function App() {
         <main className="main">
           {!authUser && (
             <PublicLandingIntro
-              onLogin={() => goToAuthTab("login")}
-              onCreateAccount={() => goToAuthTab("register")}
-            />
+  onLogin={() => goToAuthTab("login")}
+  onCreateAccount={() => goToAuthTab("register")}
+/>
           )}
 
           {!authUser && activeTab === "login" && (
             <AuthCard
-              anchorRef={authSectionRef}
               title="Iniciar sesión"
               subtitle="Entra para consultar tu plan, membresía, Strava y métricas."
             >
@@ -1016,7 +1176,6 @@ export default function App() {
 
           {!authUser && activeTab === "register" && (
             <AuthCard
-              anchorRef={authSectionRef}
               title="Crear cuenta"
               subtitle="Crea tu usuario para generar tu plan y activar tu membresía."
             >
@@ -1408,7 +1567,8 @@ export default function App() {
                         currentWeek.week_number,
                         index
                       );
-                      const isCompleted = Boolean(completedSessions[sessionKey]);
+                      const sessionEntry = completedSessions[sessionKey];
+                      const isCompleted = Boolean(sessionEntry?.completed);
 
                       return (
                         <div
@@ -1434,18 +1594,37 @@ export default function App() {
                             </p>
                           </button>
 
-                          <button
-                            className={isCompleted ? "done-button active" : "done-button"}
-                            onClick={() =>
-                              toggleSessionCompleted(
-                                session,
-                                currentWeek.week_number,
-                                index
-                              )
-                            }
-                          >
-                            {isCompleted ? "Realizada ✓" : "Marcar realizada"}
-                          </button>
+                          <div className="session-tracking-row">
+                            <label className="pace-field">
+                              <span>Ritmo por km</span>
+                              <input
+                                inputMode="numeric"
+                                placeholder="5:45"
+                                value={sessionEntry?.pace || ""}
+                                onChange={(e) =>
+                                  updateSessionPace(
+                                    session,
+                                    currentWeek.week_number,
+                                    index,
+                                    e.target.value
+                                  )
+                                }
+                              />
+                            </label>
+
+                            <button
+                              className={isCompleted ? "done-button active" : "done-button"}
+                              onClick={() =>
+                                toggleSessionCompleted(
+                                  session,
+                                  currentWeek.week_number,
+                                  index
+                                )
+                              }
+                            >
+                              {isCompleted ? "Realizada ✓" : "Marcar realizada"}
+                            </button>
+                          </div>
                         </div>
                       );
                     })}
@@ -1460,21 +1639,13 @@ export default function App() {
               <Header
                 badge="Métricas"
                 title="Progreso"
-                subtitle={
-                  showStravaIntegration
-                    ? "Sincroniza actividades para construir historial y preparar futuros ajustes inteligentes."
-                    : "Consulta el avance de tu plan. Las métricas avanzadas se activarán progresivamente."
-                }
+                subtitle="Consulta el avance de tus entrenamientos marcados manualmente. Las métricas se ajustan según tu plan."
               />
 
-              {!showStravaIntegration && (
-                <EmptyState
-                  title="Métricas avanzadas en preparación"
-                  text="Por ahora puedes consultar tu plan y sesiones. Las métricas avanzadas se activarán progresivamente para usuarios autorizados."
-                  button="Ver mi plan"
-                  onClick={() => setActiveTab("plan")}
-                />
-              )}
+              <ManualMetricsDashboard
+                planCode={planCode}
+                metrics={manualMetrics}
+              />
 
               {showStravaIntegration && !canConnectStrava && (
                 <EmptyState
@@ -1502,7 +1673,7 @@ export default function App() {
                       <h2>Historial autorizado activo</h2>
                       <p>
                         {hasAnyMetric(metrics)
-                          ? "Tus métricas ya están disponibles. Este historial será la base para futuros ajustes inteligentes."
+                          ? "Tus métricas de Strava ya están disponibles."
                           : "Conexión lista. Sincroniza actividades para actualizar el dashboard."}
                       </p>
                     </div>
@@ -1686,8 +1857,14 @@ export default function App() {
 
 function BrandMark() {
   return (
-    <div className="brand-lockup logo-only">
-      <img className="brand-logo" src="/logo.png" alt="trAIning" />
+    <div className="brand-lockup">
+      <div className="brand-icon-wrap">
+        <img className="brand-logo" src="/logo.png" alt="trAIning" />
+      </div>
+      <div>
+        <strong>trAIning</strong>
+        <span>Running Intelligence</span>
+      </div>
     </div>
   );
 }
@@ -1712,15 +1889,13 @@ function AuthCard({
   title,
   subtitle,
   children,
-  anchorRef,
 }: {
   title: string;
   subtitle: string;
   children: React.ReactNode;
-  anchorRef?: React.RefObject<HTMLDivElement | null>;
 }) {
   return (
-    <section ref={anchorRef} className="auth-card">
+    <section className="auth-card">
       <span className="chip cyan">Acceso</span>
       <h1>{title}</h1>
       <p>{subtitle}</p>
@@ -1738,8 +1913,6 @@ function PublicLandingIntro({
 }) {
   return (
     <section className="public-hero">
-      <BrandMark />
-
       <span className="chip lime">{BETA_COPY.badge}</span>
       <h1>Planes de running listos para entrenar hoy</h1>
       <p className="public-lead">
@@ -1887,6 +2060,88 @@ function EmptyState({
       <button className="primary-button" onClick={onClick}>
         {button}
       </button>
+    </div>
+  );
+}
+
+function ManualMetricsDashboard({
+  planCode,
+  metrics,
+}: {
+  planCode?: string | null;
+  metrics: ManualMetrics;
+}) {
+  const plan = planCode || "starter";
+  const isPerformance = plan === "performance" || plan === "pro_coach";
+  const isPro = plan === "pro_coach";
+  const avgPace = metrics.avgPaceSecondsPerKm
+    ? formatPace(metrics.avgPaceSecondsPerKm)
+    : "Agrega ritmo";
+
+  return (
+    <div className="manual-metrics-panel">
+      <div className="manual-metrics-head">
+        <span className="chip lime">Seguimiento manual</span>
+        <h2>{getPlanLabel(plan)} · Métricas de entrenamiento</h2>
+        <p>
+          Marca sesiones como realizadas y agrega tu ritmo por km para construir
+          métricas mientras activamos conexiones externas.
+        </p>
+      </div>
+
+      <div className="metrics-grid">
+        <StatCard
+          label="Sesiones realizadas"
+          value={`${metrics.completedSessions}/${metrics.totalSessions}`}
+          hint={`${metrics.completionRate}% de avance`}
+        />
+        <StatCard
+          label="Km completados"
+          value={`${metrics.completedDistanceKm} km`}
+          hint={`${metrics.plannedDistanceKm} km planeados`}
+        />
+        <StatCard
+          label="Ritmo promedio"
+          value={avgPace}
+          hint={`${metrics.sessionsWithPace} sesiones con ritmo`}
+        />
+      </div>
+
+      {isPerformance && (
+        <div className="metrics-grid advanced-metrics-grid">
+          <StatCard
+            label="Tiempo estimado"
+            value={formatTime(metrics.totalEstimatedSeconds)}
+            hint="Calculado con ritmo x distancia"
+          />
+          <StatCard
+            label="Tirada más larga"
+            value={`${metrics.longRunKm} km`}
+            hint="Sesión realizada de mayor distancia"
+          />
+          <StatCard
+            label="Carga estimada"
+            value={`${metrics.trainingLoadScore}`}
+            hint="Distancia + cumplimiento"
+          />
+        </div>
+      )}
+
+      {isPro && (
+        <div className="pro-insight-card">
+          <span className="chip cyan">Pro Coach</span>
+          <h3>Lectura rápida</h3>
+          <p>
+            {metrics.completedSessions === 0
+              ? "Aún no hay sesiones realizadas. Marca tu primer entrenamiento para iniciar el análisis."
+              : metrics.missingPace > 0
+              ? `Llevas ${metrics.completedSessions} sesiones realizadas. Agrega el ritmo en ${metrics.missingPace} sesión(es) para mejorar la lectura del progreso.`
+              : metrics.completionRate >= 80
+              ? "Excelente consistencia. Mantén el control del ritmo y evita subir la carga demasiado rápido."
+              : "Buen inicio. Prioriza completar sesiones clave antes de aumentar volumen o intensidad."}
+          </p>
+        </div>
+      )}
     </div>
   );
 }
@@ -2070,30 +2325,51 @@ button:disabled {
 }
 
 .brand-lockup {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  justify-content: center;
+  gap: 12px;
   width: fit-content;
 }
 
-.brand-lockup.logo-only {
-  width: 112px;
-  height: 112px;
-  border-radius: 30px;
-  padding: 12px;
-  background: linear-gradient(135deg, rgba(214,255,77,0.12), rgba(0,230,255,0.08));
-  border: 1px solid rgba(214,255,77,0.22);
-  box-shadow:
-    0 22px 50px rgba(0,0,0,0.26),
-    0 0 0 1px rgba(255,255,255,0.035) inset;
+.brand-icon-wrap {
+  width: 52px;
+  height: 52px;
+  border-radius: 18px;
+  display: grid;
+  place-items: center;
+  background: linear-gradient(135deg, rgba(214,255,77,0.16), rgba(0,230,255,0.10));
+  border: 1px solid rgba(214,255,77,0.18);
+  box-shadow: 0 16px 36px rgba(214,255,77,0.08);
   overflow: hidden;
 }
 
 .brand-logo {
-  width: 100%;
-  height: 100%;
+  width: 38px;
+  height: 38px;
   object-fit: contain;
   display: block;
+}
+
+.brand-logo[src="/logo.png"] {
+  color: transparent;
+}
+
+.brand-lockup strong {
+  display: block;
+  color: #D6FF4D;
+  font-size: 18px;
+  font-weight: 950;
+  letter-spacing: -0.02em;
+}
+
+.brand-lockup span {
+  display: block;
+  margin-top: 4px;
+  color: #00E6FF;
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  font-weight: 900;
 }
 
 .brand-subtitle {
@@ -2724,6 +3000,83 @@ button:disabled {
   font-weight: 950;
 }
 
+.session-tracking-row {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.pace-field {
+  display: grid;
+  gap: 6px;
+  min-width: 150px;
+}
+
+.pace-field span {
+  color: rgba(255,255,255,0.58);
+  font-size: 11px;
+  font-weight: 950;
+}
+
+.pace-field input {
+  width: 130px;
+  border-radius: 14px;
+  border: 1px solid rgba(255,255,255,0.10);
+  background: rgba(255,255,255,0.045);
+  color: white;
+  padding: 10px 12px;
+  outline: none;
+  font-weight: 900;
+}
+
+.manual-metrics-panel {
+  display: grid;
+  gap: 18px;
+}
+
+.manual-metrics-head {
+  border-radius: 26px;
+  padding: 22px;
+  background: linear-gradient(135deg, rgba(214,255,77,0.10), rgba(0,230,255,0.06));
+  border: 1px solid rgba(255,255,255,0.08);
+}
+
+.manual-metrics-head h2 {
+  font-size: clamp(26px, 4vw, 38px);
+  margin: 14px 0 0;
+  line-height: 1.08;
+}
+
+.manual-metrics-head p {
+  color: rgba(255,255,255,0.68);
+  line-height: 1.6;
+  margin: 10px 0 0;
+}
+
+.advanced-metrics-grid {
+  margin-top: 0;
+}
+
+.pro-insight-card {
+  border-radius: 24px;
+  padding: 20px;
+  background: rgba(0,230,255,0.07);
+  border: 1px solid rgba(0,230,255,0.14);
+}
+
+.pro-insight-card h3 {
+  font-size: 24px;
+  margin: 14px 0 0;
+}
+
+.pro-insight-card p {
+  color: rgba(255,255,255,0.72);
+  line-height: 1.6;
+  margin: 10px 0 0;
+}
+
 .session-top {
   display: flex;
   justify-content: space-between;
@@ -2892,7 +3245,7 @@ button:disabled {
 
 @media (max-width: 920px) {
   .brand-lockup {
-    width: fit-content;
+    width: 100%;
   }
 
   .brand-icon-wrap {
@@ -3015,117 +3368,6 @@ button:disabled {
 
   .price-card {
     min-height: auto;
-  }
-}
-  /* Brand logo only override - final */
-.brand-logo-only,
-.brand-lockup.logo-only,
-.brand-icon-wrap {
-  width: auto !important;
-  height: auto !important;
-  min-width: 0 !important;
-  min-height: 0 !important;
-  max-width: none !important;
-  max-height: none !important;
-  display: flex !important;
-  align-items: center !important;
-  justify-content: flex-start !important;
-  background: transparent !important;
-  border: 0 !important;
-  box-shadow: none !important;
-  border-radius: 0 !important;
-  padding: 0 !important;
-  margin: 0 !important;
-  overflow: visible !important;
-}
-
-.brand-logo-image,
-.brand-logo {
-  width: 340px !important;
-  height: auto !important;
-  max-width: 100% !important;
-  max-height: none !important;
-  object-fit: contain !important;
-  display: block !important;
-  transform: scale(1.28);
-  transform-origin: left center;
-}
-
-/* Hide old brand text if an older block still exists somewhere */
-.brand-lockup strong,
-.brand-lockup span,
-.brand-subtitle {
-  display: none !important;
-}
-
-.public-hero .brand-logo-only,
-.public-hero .brand-lockup,
-.public-hero .brand-icon-wrap {
-  margin-bottom: 28px !important;
-}
-
-.public-hero .brand-logo-image,
-.public-hero .brand-logo {
-  width: 390px !important;
-  transform: scale(1.35);
-  transform-origin: left center;
-}
-
-.sidebar .brand-logo-only,
-.sidebar .brand-lockup,
-.sidebar .brand-icon-wrap {
-  margin-bottom: 18px !important;
-}
-
-.sidebar .brand-logo-image,
-.sidebar .brand-logo {
-  width: 280px !important;
-  transform: scale(1.25);
-  transform-origin: left center;
-}
-
-.auth-card .brand-logo-image,
-.loading-card .brand-logo-image,
-.auth-card .brand-logo,
-.loading-card .brand-logo {
-  width: 300px !important;
-  transform: scale(1.25);
-  transform-origin: left center;
-}
-
-@media (max-width: 920px) {
-  .brand-logo-image,
-  .brand-logo {
-    width: 300px !important;
-    transform: scale(1.25);
-    transform-origin: left center;
-  }
-
-  .public-hero .brand-logo-image,
-  .public-hero .brand-logo {
-    width: 330px !important;
-    transform: scale(1.28);
-  }
-
-  .sidebar .brand-logo-image,
-  .sidebar .brand-logo {
-    width: 260px !important;
-    transform: scale(1.2);
-  }
-}
-
-@media (max-width: 920px) {
-  .brand-logo-only {
-    width: 128px;
-    height: 128px;
-    border-radius: 32px;
-    padding: 14px;
-  }
-
-  .sidebar .brand-logo-only {
-    width: 112px;
-    height: 112px;
-    border-radius: 28px;
   }
 }
 `;
