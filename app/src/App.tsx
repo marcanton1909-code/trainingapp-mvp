@@ -80,6 +80,15 @@ type Session = {
   status?: string;
 };
 
+type TrainingPlan = {
+  id?: string;
+  created_at?: string;
+  start_date?: string;
+  target_distance?: string;
+  distance?: string;
+  goal_distance?: string;
+};
+
 type Week = {
   id?: string;
   week_number: number;
@@ -251,6 +260,37 @@ function getSessionKey(session: Session, weekNumber: number, index: number) {
   return session.id || `week-${weekNumber}-session-${index}-${session.title}`;
 }
 
+function getCurrentPlanWeekNumber(plan: TrainingPlan | null, weeks: Week[]) {
+  if (!weeks.length) return 1;
+
+  const maxWeek = Math.max(...weeks.map((week) => Number(week.week_number || 1)));
+  const startDateValue = plan?.start_date || plan?.created_at;
+
+  if (!startDateValue) return 1;
+
+  const start = new Date(startDateValue);
+  const now = new Date();
+
+  if (Number.isNaN(start.getTime())) return 1;
+
+  const diffMs = now.getTime() - start.getTime();
+  const diffDays = Math.max(0, Math.floor(diffMs / (1000 * 60 * 60 * 24)));
+  const calculatedWeek = Math.floor(diffDays / 7) + 1;
+
+  return Math.min(Math.max(calculatedWeek, 1), maxWeek);
+}
+
+function getWeekByNumber(weeks: Week[], weekNumber: number | null) {
+  if (!weeks.length) return null;
+
+  if (!weekNumber) return weeks[0];
+
+  return (
+    weeks.find((week) => Number(week.week_number) === Number(weekNumber)) ||
+    weeks[0]
+  );
+}
+
 function getSessionDistanceKm(session: Session) {
   return Number(session.distance_target || 0);
 }
@@ -393,7 +433,9 @@ export default function App() {
     eventDate: "",
   });
 
+  const [trainingPlan, setTrainingPlan] = useState<TrainingPlan | null>(null);
   const [weeks, setWeeks] = useState<Week[]>([]);
+  const [selectedWeekNumber, setSelectedWeekNumber] = useState<number | null>(null);
   const [metrics, setMetrics] = useState<MetricsResponse | null>(null);
   const [selectedSession, setSelectedSession] = useState<Session | null>(null);
   const [completedSessions, setCompletedSessions] = useState<Record<string, ManualSessionEntry>>({});
@@ -423,9 +465,24 @@ export default function App() {
   const isProCoach = planCode === "pro_coach";
   const allowedDistances = getAllowedDistances(planCode);
 
-  const currentWeek = useMemo(() => weeks[0] || null, [weeks]);
+  const activeWeekNumber = useMemo(
+    () => getCurrentPlanWeekNumber(trainingPlan, weeks),
+    [trainingPlan, weeks]
+  );
+
+  const currentWeek = useMemo(
+    () => getWeekByNumber(weeks, selectedWeekNumber || activeWeekNumber),
+    [weeks, selectedWeekNumber, activeWeekNumber]
+  );
+
   const currentSessions = currentWeek?.sessions || [];
-  const highlightedSession = currentSessions[0] || null;
+  const highlightedSession =
+    currentSessions.find((session, index) => {
+      const key = getSessionKey(session, currentWeek?.week_number || 1, index);
+      return !completedSessions[key];
+    }) ||
+    currentSessions[0] ||
+    null;
   const mainMetric = metrics?.days28 || metrics?.days7 || null;
   const completedThisWeek = currentSessions.filter((session, index) =>
     completedSessions[getSessionKey(session, currentWeek?.week_number || 1, index)]?.completed
@@ -617,7 +674,15 @@ export default function App() {
       const data = await res.json();
 
       if (res.ok) {
+        setTrainingPlan(data.plan || null);
         setWeeks(data.weeks || []);
+
+        const calculatedWeek = getCurrentPlanWeekNumber(
+          data.plan || null,
+          data.weeks || []
+        );
+
+        setSelectedWeekNumber((prev) => prev || calculatedWeek);
 
         const savedDistance =
           normalizeDistance(data.runnerGoal?.target_distance) ||
@@ -991,6 +1056,27 @@ export default function App() {
 
     setCompletedSessions(next);
     localStorage.setItem(getCompletedSessionsKey(authUser.id), JSON.stringify(next));
+
+    const week = weeks.find((item) => Number(item.week_number) === Number(weekNumber));
+    const weekSessions = week?.sessions || [];
+
+    const completedCount = weekSessions.filter((item, itemIndex) => {
+      const itemKey = getSessionKey(item, weekNumber, itemIndex);
+      return Boolean(next[itemKey]);
+    }).length;
+
+    if (
+      weekSessions.length > 0 &&
+      completedCount === weekSessions.length &&
+      weekNumber < weeks.length
+    ) {
+      window.setTimeout(() => {
+        setSelectedWeekNumber(weekNumber + 1);
+        setResult(
+          `Semana ${weekNumber} completada. Avanzaste a la semana ${weekNumber + 1}.`
+        );
+      }, 250);
+    }
   }
 
   function updateSessionPace(
@@ -1558,8 +1644,36 @@ export default function App() {
                       <span className="completion-summary">
                         {completedThisWeek} de {currentSessions.length} sesiones realizadas
                       </span>
+                      <span className="active-week-note">
+                        Semana sugerida: {activeWeekNumber}
+                      </span>
                     </div>
-                    <strong>{currentWeek.total_target_distance} km</strong>
+
+                    <div className="week-actions">
+                      <strong>{currentWeek.total_target_distance} km</strong>
+
+                      <div className="week-switcher">
+                        <button
+                          type="button"
+                          disabled={Number(currentWeek.week_number) <= 1}
+                          onClick={() =>
+                            setSelectedWeekNumber(Number(currentWeek.week_number) - 1)
+                          }
+                        >
+                          ← Anterior
+                        </button>
+
+                        <button
+                          type="button"
+                          disabled={Number(currentWeek.week_number) >= weeks.length}
+                          onClick={() =>
+                            setSelectedWeekNumber(Number(currentWeek.week_number) + 1)
+                          }
+                        >
+                          Siguiente →
+                        </button>
+                      </div>
+                    </div>
                   </div>
 
                   <div className="session-list">
@@ -1861,14 +1975,8 @@ export default function App() {
 
 function BrandMark() {
   return (
-    <div className="brand-lockup">
-      <div className="brand-icon-wrap">
-        <img className="brand-logo" src="/logo.png" alt="trAIning" />
-      </div>
-      <div>
-        <strong>trAIning</strong>
-        <span>Running Intelligence</span>
-      </div>
+    <div className="brand-logo-only">
+      <img className="brand-logo-image" src="/logo.png" alt="trAIning" />
     </div>
   );
 }
@@ -1919,6 +2027,7 @@ function PublicLandingIntro({
 }) {
   return (
     <section className="public-hero">
+      <BrandMark />
       <span className="chip lime">{BETA_COPY.badge}</span>
       <h1>Planes de running listos para entrenar hoy</h1>
       <p className="public-lead">
@@ -3376,4 +3485,154 @@ button:disabled {
     min-height: auto;
   }
 }
+
+/* FINAL BRAND LOGO OVERRIDE - do not remove */
+.brand-logo-only,
+.brand-lockup,
+.brand-icon-wrap {
+  width: auto !important;
+  height: auto !important;
+  min-width: 0 !important;
+  min-height: 0 !important;
+  max-width: none !important;
+  max-height: none !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: flex-start !important;
+  background: transparent !important;
+  border: 0 !important;
+  box-shadow: none !important;
+  border-radius: 0 !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  overflow: visible !important;
+  gap: 0 !important;
+}
+
+.brand-logo-image,
+.brand-logo {
+  width: 340px !important;
+  height: auto !important;
+  max-width: 100% !important;
+  max-height: none !important;
+  object-fit: contain !important;
+  display: block !important;
+  transform: scale(1.28);
+  transform-origin: left center;
+}
+
+.brand-lockup strong,
+.brand-lockup span,
+.brand-subtitle {
+  display: none !important;
+}
+
+.public-hero .brand-logo-only,
+.public-hero .brand-lockup,
+.public-hero .brand-icon-wrap {
+  margin-bottom: 28px !important;
+}
+
+.public-hero .brand-logo-image,
+.public-hero .brand-logo {
+  width: 390px !important;
+  transform: scale(1.35);
+  transform-origin: left center;
+}
+
+.sidebar .brand-logo-only,
+.sidebar .brand-lockup,
+.sidebar .brand-icon-wrap {
+  margin-bottom: 18px !important;
+}
+
+.sidebar .brand-logo-image,
+.sidebar .brand-logo {
+  width: 280px !important;
+  transform: scale(1.25);
+  transform-origin: left center;
+}
+
+/* Weekly plan controls */
+.week-actions {
+  display: grid;
+  gap: 12px;
+  justify-items: end;
+}
+
+.week-switcher {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.week-switcher button {
+  border: 1px solid rgba(255,255,255,0.10);
+  background: rgba(255,255,255,0.05);
+  color: rgba(255,255,255,0.82);
+  border-radius: 14px;
+  padding: 10px 12px;
+  font-size: 12px;
+  font-weight: 950;
+  cursor: pointer;
+}
+
+.week-switcher button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.active-week-note {
+  display: inline-flex;
+  margin-top: 8px;
+  margin-left: 8px;
+  border-radius: 999px;
+  padding: 8px 11px;
+  background: rgba(0,230,255,0.08);
+  color: #00E6FF;
+  font-size: 12px;
+  font-weight: 950;
+}
+
+@media (max-width: 920px) {
+  .brand-logo-image,
+  .brand-logo {
+    width: 300px !important;
+    transform: scale(1.25);
+    transform-origin: left center;
+  }
+
+  .public-hero .brand-logo-image,
+  .public-hero .brand-logo {
+    width: 330px !important;
+    transform: scale(1.28);
+  }
+
+  .sidebar .brand-logo-image,
+  .sidebar .brand-logo {
+    width: 260px !important;
+    transform: scale(1.2);
+  }
+
+  .week-actions {
+    justify-items: start;
+    width: 100%;
+  }
+
+  .week-switcher {
+    width: 100%;
+  }
+
+  .week-switcher button {
+    flex: 1;
+  }
+
+  .active-week-note {
+    margin-left: 0;
+    display: flex;
+    width: fit-content;
+  }
+}
+
 `;
