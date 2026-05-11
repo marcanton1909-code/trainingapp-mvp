@@ -3955,4 +3955,267 @@ app.post("/api/mercadopago/webhook", async (c) => {
   }
 });
 
+
+app.get("/api/session-progress/me", async (c) => {
+  try {
+    const auth = await requireAuth(c);
+    const userId = auth.user.id;
+
+    const rows = await c.env.DB
+      .prepare(
+        `select
+           id,
+           user_id,
+           training_plan_id,
+           training_week_id,
+           training_session_id,
+           week_number,
+           session_index,
+           session_title,
+           is_completed,
+           completed_at,
+           actual_distance_km,
+           actual_duration_minutes,
+           actual_pace_seconds_per_km,
+           effort_score,
+           notes,
+           source,
+           created_at,
+           updated_at
+         from training_session_progress
+         where user_id = ?1
+         order by week_number asc, session_index asc`
+      )
+      .bind(userId)
+      .all();
+
+    return c.json({
+      ok: true,
+      progress: rows.results || [],
+    });
+  } catch (error) {
+    return c.json(
+      {
+        ok: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : "No fue posible consultar progreso de entrenamientos",
+      },
+      500
+    );
+  }
+});
+
+app.post("/api/session-progress", async (c) => {
+  try {
+    const auth = await requireAuth(c);
+    const userId = auth.user.id;
+    const body = await c.req.json();
+
+    const now = new Date().toISOString();
+
+    const weekNumber = Number(body.weekNumber || body.week_number || 0);
+    const sessionIndex = Number(body.sessionIndex ?? body.session_index ?? 0);
+
+    if (!weekNumber || Number.isNaN(weekNumber)) {
+      return c.json(
+        {
+          ok: false,
+          error: "weekNumber es requerido",
+        },
+        400
+      );
+    }
+
+    if (Number.isNaN(sessionIndex)) {
+      return c.json(
+        {
+          ok: false,
+          error: "sessionIndex inválido",
+        },
+        400
+      );
+    }
+
+    const existing = await c.env.DB
+      .prepare(
+        `select id
+         from training_session_progress
+         where user_id = ?1
+           and week_number = ?2
+           and session_index = ?3
+         limit 1`
+      )
+      .bind(userId, weekNumber, sessionIndex)
+      .first<{ id: string }>();
+
+    const isCompleted = body.isCompleted ?? body.is_completed ? 1 : 0;
+
+    const completedAt =
+      isCompleted === 1
+        ? body.completedAt || body.completed_at || now
+        : null;
+
+    const actualDistanceKm =
+      body.actualDistanceKm === "" || body.actualDistanceKm === undefined
+        ? null
+        : Number(body.actualDistanceKm);
+
+    const actualDurationMinutes =
+      body.actualDurationMinutes === "" ||
+      body.actualDurationMinutes === undefined
+        ? null
+        : Number(body.actualDurationMinutes);
+
+    let actualPaceSecondsPerKm =
+      body.actualPaceSecondsPerKm === "" ||
+      body.actualPaceSecondsPerKm === undefined
+        ? null
+        : Number(body.actualPaceSecondsPerKm);
+
+    if (
+      (!actualPaceSecondsPerKm || Number.isNaN(actualPaceSecondsPerKm)) &&
+      actualDistanceKm &&
+      actualDurationMinutes &&
+      actualDistanceKm > 0
+    ) {
+      actualPaceSecondsPerKm = Math.round(
+        (actualDurationMinutes * 60) / actualDistanceKm
+      );
+    }
+
+    const effortScore =
+      body.effortScore === "" || body.effortScore === undefined
+        ? null
+        : Number(body.effortScore);
+
+    const payload = {
+      trainingPlanId: body.trainingPlanId || body.training_plan_id || null,
+      trainingWeekId: body.trainingWeekId || body.training_week_id || null,
+      trainingSessionId:
+        body.trainingSessionId || body.training_session_id || null,
+      sessionTitle: body.sessionTitle || body.session_title || null,
+      notes: body.notes || null,
+      source: body.source || "manual",
+    };
+
+    if (existing?.id) {
+      await c.env.DB
+        .prepare(
+          `update training_session_progress
+           set training_plan_id = ?1,
+               training_week_id = ?2,
+               training_session_id = ?3,
+               session_title = ?4,
+               is_completed = ?5,
+               completed_at = ?6,
+               actual_distance_km = ?7,
+               actual_duration_minutes = ?8,
+               actual_pace_seconds_per_km = ?9,
+               effort_score = ?10,
+               notes = ?11,
+               source = ?12,
+               updated_at = ?13
+           where id = ?14
+             and user_id = ?15`
+        )
+        .bind(
+          payload.trainingPlanId,
+          payload.trainingWeekId,
+          payload.trainingSessionId,
+          payload.sessionTitle,
+          isCompleted,
+          completedAt,
+          Number.isNaN(actualDistanceKm) ? null : actualDistanceKm,
+          Number.isNaN(actualDurationMinutes) ? null : actualDurationMinutes,
+          Number.isNaN(actualPaceSecondsPerKm)
+            ? null
+            : actualPaceSecondsPerKm,
+          Number.isNaN(effortScore) ? null : effortScore,
+          payload.notes,
+          payload.source,
+          now,
+          existing.id,
+          userId
+        )
+        .run();
+
+      return c.json({
+        ok: true,
+        id: existing.id,
+        updated: true,
+      });
+    }
+
+    const id = crypto.randomUUID();
+
+    await c.env.DB
+      .prepare(
+        `insert into training_session_progress (
+          id,
+          user_id,
+          training_plan_id,
+          training_week_id,
+          training_session_id,
+          week_number,
+          session_index,
+          session_title,
+          is_completed,
+          completed_at,
+          actual_distance_km,
+          actual_duration_minutes,
+          actual_pace_seconds_per_km,
+          effort_score,
+          notes,
+          source,
+          created_at,
+          updated_at
+        ) values (
+          ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+          ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18
+        )`
+      )
+      .bind(
+        id,
+        userId,
+        payload.trainingPlanId,
+        payload.trainingWeekId,
+        payload.trainingSessionId,
+        weekNumber,
+        sessionIndex,
+        payload.sessionTitle,
+        isCompleted,
+        completedAt,
+        Number.isNaN(actualDistanceKm) ? null : actualDistanceKm,
+        Number.isNaN(actualDurationMinutes) ? null : actualDurationMinutes,
+        Number.isNaN(actualPaceSecondsPerKm) ? null : actualPaceSecondsPerKm,
+        Number.isNaN(effortScore) ? null : effortScore,
+        payload.notes,
+        payload.source,
+        now,
+        now
+      )
+      .run();
+
+    return c.json({
+      ok: true,
+      id,
+      created: true,
+    });
+  } catch (error) {
+    return c.json(
+      {
+        ok: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : "No fue posible guardar progreso de entrenamiento",
+      },
+      500
+    );
+  }
+});
+
+
 export default app; 
