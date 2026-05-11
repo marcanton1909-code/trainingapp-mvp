@@ -80,6 +80,7 @@ type Session = {
   status?: string;
 };
 
+
 type TrainingPlan = {
   id?: string;
   created_at?: string;
@@ -252,12 +253,12 @@ function hasAnyMetric(metrics: MetricsResponse | null) {
   );
 }
 
-function getCompletedSessionsKey(userId: string) {
-  return `trainingapp_completed_sessions_${userId}`;
-}
-
 function getSessionKey(session: Session, weekNumber: number, index: number) {
   return session.id || `week-${weekNumber}-session-${index}-${session.title}`;
+}
+
+function getCompletedSessionsKey(userId: string) {
+  return `trainingapp_completed_sessions_${userId}`;
 }
 
 function getCurrentPlanWeekNumber(plan: TrainingPlan | null, weeks: Week[]) {
@@ -1062,7 +1063,7 @@ export default function App() {
 
     const completedCount = weekSessions.filter((item, itemIndex) => {
       const itemKey = getSessionKey(item, weekNumber, itemIndex);
-      return Boolean(next[itemKey]);
+      return Boolean(next[itemKey]?.completed);
     }).length;
 
     if (
