@@ -253,9 +253,6 @@ function hasAnyMetric(metrics: MetricsResponse | null) {
   );
 }
 
-function getSessionKey(session: Session, weekNumber: number, index: number) {
-  return session.id || `week-${weekNumber}-session-${index}-${session.title}`;
-}
 
 function getProgressKey(weekNumber: number, sessionIndex: number) {
   return `week-${weekNumber}-session-${sessionIndex}`;
@@ -382,7 +379,7 @@ function calculateManualMetrics(
   );
 
   sessions.forEach((session, index) => {
-    const key = getSessionKey(session, weekNumber, index);
+    const key = getProgressKey(weekNumber, index);
     const entry = completedSessions[key];
     const distanceKm = getSessionDistanceKm(session);
 
@@ -513,15 +510,15 @@ export default function App() {
 
   const currentSessions = currentWeek?.sessions || [];
   const highlightedSession =
-    currentSessions.find((session, index) => {
-      const key = getSessionKey(session, currentWeek?.week_number || 1, index);
-      return !completedSessions[key];
+    currentSessions.find((_, index) => {
+      const key = getProgressKey(currentWeek?.week_number || 1, index);
+      return !completedSessions[key]?.completed;
     }) ||
     currentSessions[0] ||
     null;
   const mainMetric = metrics?.days28 || metrics?.days7 || null;
-  const completedThisWeek = currentSessions.filter((session, index) =>
-    completedSessions[getSessionKey(session, currentWeek?.week_number || 1, index)]?.completed
+  const completedThisWeek = currentSessions.filter((_, index) =>
+    completedSessions[getProgressKey(currentWeek?.week_number || 1, index)]?.completed
   ).length;
   const manualMetrics = useMemo(
     () =>
