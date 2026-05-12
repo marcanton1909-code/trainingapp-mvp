@@ -324,6 +324,35 @@ function getWeekByNumber(weeks: Week[], weekNumber: number | null) {
   );
 }
 
+function getVisiblePlanWeekNumber(
+  weeks: Week[],
+  activeWeekNumber: number,
+  completedSessions: Record<string, ManualSessionEntry>
+) {
+  if (!weeks.length) return 1;
+
+  const maxWeek = Math.max(...weeks.map((week) => Number(week.week_number || 1)));
+  let visibleWeek = Math.min(Math.max(activeWeekNumber, 1), maxWeek);
+
+  while (visibleWeek < maxWeek) {
+    const week = weeks.find((item) => Number(item.week_number) === visibleWeek);
+    const sessions = week?.sessions || [];
+
+    if (!sessions.length) break;
+
+    const isFullyCompleted = sessions.every((_, index) => {
+      const key = getProgressKey(visibleWeek, index);
+      return Boolean(completedSessions[key]?.completed);
+    });
+
+    if (!isFullyCompleted) break;
+
+    visibleWeek += 1;
+  }
+
+  return visibleWeek;
+}
+
 function getSessionDistanceKm(session: Session) {
   return Number(session.distance_target || 0);
 }
@@ -465,10 +494,10 @@ export default function App() {
     eventName: "",
     eventDate: "",
   });
+  const [runnerProfileDraftTouched, setRunnerProfileDraftTouched] = useState(false);
 
   const [trainingPlan, setTrainingPlan] = useState<TrainingPlan | null>(null);
   const [weeks, setWeeks] = useState<Week[]>([]);
-  const [selectedWeekNumber, setSelectedWeekNumber] = useState<number | null>(null);
   const [metrics, setMetrics] = useState<MetricsResponse | null>(null);
   const [selectedSession, setSelectedSession] = useState<Session | null>(null);
   const [completedSessions, setCompletedSessions] = useState<Record<string, ManualSessionEntry>>({});
@@ -503,9 +532,14 @@ export default function App() {
     [trainingPlan, weeks]
   );
 
+  const visibleWeekNumber = useMemo(
+    () => getVisiblePlanWeekNumber(weeks, activeWeekNumber, completedSessions),
+    [weeks, activeWeekNumber, completedSessions]
+  );
+
   const currentWeek = useMemo(
-    () => getWeekByNumber(weeks, selectedWeekNumber || activeWeekNumber),
-    [weeks, selectedWeekNumber, activeWeekNumber]
+    () => getWeekByNumber(weeks, visibleWeekNumber),
+    [weeks, visibleWeekNumber]
   );
 
   const currentSessions = currentWeek?.sessions || [];
@@ -741,13 +775,6 @@ async function fetchPlanSilently() {
         setWeeks(data.weeks || []);
         await fetchSessionProgressSilently();
 
-        const calculatedWeek = getCurrentPlanWeekNumber(
-          data.plan || null,
-          data.weeks || []
-        );
-
-        setSelectedWeekNumber((prev) => prev || calculatedWeek);
-
         const savedDistance =
           normalizeDistance(data.runnerGoal?.target_distance) ||
           normalizeDistance(data.plan?.target_distance) ||
@@ -761,7 +788,9 @@ async function fetchPlanSilently() {
               data.runnerGoal?.goal_type ||
               data.runnerProfile?.preferred_goal_type ||
               prev.goal,
-            distance: savedDistance || prev.distance,
+            distance: runnerProfileDraftTouched
+              ? prev.distance
+              : savedDistance || prev.distance,
             daysPerWeek: Number(
               data.runnerProfile?.weekly_days_available || prev.daysPerWeek
             ),
@@ -1033,6 +1062,7 @@ async function fetchPlanSilently() {
       }
 
       await fetchPlanSilently();
+      setRunnerProfileDraftTouched(false);
       setResult("Plan generado correctamente.");
     } catch (error) {
       setResult(error instanceof Error ? error.message : "Error inesperado");
@@ -1170,9 +1200,8 @@ async function fetchPlanSilently() {
         weekNumber < weeks.length
       ) {
         window.setTimeout(() => {
-          setSelectedWeekNumber(weekNumber + 1);
           setResult(
-            `Semana ${weekNumber} completada. Avanzaste a la semana ${weekNumber + 1}.`
+            `Semana ${weekNumber} completada. Ya puedes ver la semana ${weekNumber + 1}.`
           );
         }, 250);
       }
@@ -1654,12 +1683,13 @@ async function fetchPlanSilently() {
                   <Field label="Distancia">
                     <select
                       value={form.distance}
-                      onChange={(e) =>
+                      onChange={(e) => {
+                        setRunnerProfileDraftTouched(true);
                         setForm((prev) => ({
                           ...prev,
                           distance: e.target.value,
-                        }))
-                      }
+                        }));
+                      }}
                     >
                       {allowedDistances.map((distance) => (
                         <option key={distance}>{distance}</option>
@@ -1789,34 +1819,13 @@ async function fetchPlanSilently() {
                         {completedThisWeek} de {currentSessions.length} sesiones realizadas
                       </span>
                       <span className="active-week-note">
-                        Semana sugerida: {activeWeekNumber}
+                        Semana en curso: {visibleWeekNumber}
                       </span>
                     </div>
 
                     <div className="week-actions">
                       <strong>{currentWeek.total_target_distance} km</strong>
 
-                      <div className="week-switcher">
-                        <button
-                          type="button"
-                          disabled={Number(currentWeek.week_number) <= 1}
-                          onClick={() =>
-                            setSelectedWeekNumber(Number(currentWeek.week_number) - 1)
-                          }
-                        >
-                          ← Anterior
-                        </button>
-
-                        <button
-                          type="button"
-                          disabled={Number(currentWeek.week_number) >= weeks.length}
-                          onClick={() =>
-                            setSelectedWeekNumber(Number(currentWeek.week_number) + 1)
-                          }
-                        >
-                          Siguiente →
-                        </button>
-                      </div>
                     </div>
                   </div>
 
