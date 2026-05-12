@@ -257,9 +257,44 @@ function getSessionKey(session: Session, weekNumber: number, index: number) {
   return session.id || `week-${weekNumber}-session-${index}-${session.title}`;
 }
 
-function getCompletedSessionsKey(userId: string) {
-  return `trainingapp_completed_sessions_${userId}`;
+function getProgressKey(weekNumber: number, sessionIndex: number) {
+  return `week-${weekNumber}-session-${sessionIndex}`;
 }
+
+function paceInputToSeconds(value?: string | null) {
+  if (!value) return null;
+
+  const clean = String(value).trim();
+
+  if (!clean) return null;
+
+  const parts = clean.split(":");
+
+  if (parts.length === 2) {
+    const minutes = Number(parts[0]);
+    const seconds = Number(parts[1]);
+
+    if (!Number.isNaN(minutes) && !Number.isNaN(seconds)) {
+      return Math.round(minutes * 60 + seconds);
+    }
+  }
+
+  const asNumber = Number(clean.replace(",", "."));
+
+  if (!Number.isNaN(asNumber) && asNumber > 0) {
+    return Math.round(asNumber * 60);
+  }
+
+  return null;
+}
+
+function secondsToPaceInput(seconds?: number | null) {
+  if (!seconds || seconds <= 0) return "";
+  const minutes = Math.floor(seconds / 60);
+  const secs = Math.round(seconds % 60).toString().padStart(2, "0");
+  return `${minutes}:${secs}`;
+}
+
 
 function getCurrentPlanWeekNumber(plan: TrainingPlan | null, weeks: Week[]) {
   if (!weeks.length) return 1;
@@ -527,15 +562,9 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!authUser?.id) return;
-
-    try {
-      const stored = localStorage.getItem(getCompletedSessionsKey(authUser.id));
-      setCompletedSessions(stored ? JSON.parse(stored) : {});
-    } catch {
-      setCompletedSessions({});
-    }
-  }, [authUser?.id]);
+    if (!authUser?.id || !authToken) return;
+    fetchSessionProgressSilently();
+  }, [authUser?.id, authToken]);
 
   useEffect(() => {
     async function boot() {
@@ -667,7 +696,43 @@ export default function App() {
     }));
   }
 
-  async function fetchPlanSilently() {
+  async function fetchSessionProgressSilently() {
+    if (!authToken) return;
+
+    try {
+      const res = await fetch(`${API_URL}/api/session-progress/me`, {
+        headers: {
+          Authorization: `Bearer ${authToken}`,
+        },
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) return;
+
+      const rows = data.progress || [];
+      const next: Record<string, ManualSessionEntry> = {};
+
+      rows.forEach((row: any) => {
+        const key = getProgressKey(
+          Number(row.week_number),
+          Number(row.session_index)
+        );
+
+        next[key] = {
+          completed: Boolean(row.is_completed),
+          completedAt: row.completed_at || undefined,
+          pace: secondsToPaceInput(row.actual_pace_seconds_per_km),
+        };
+      });
+
+      setCompletedSessions(next);
+    } catch {
+      // Sin bloquear UI
+    }
+  }
+
+async function fetchPlanSilently() {
     if (!authUser?.id) return;
 
     try {
@@ -677,6 +742,7 @@ export default function App() {
       if (res.ok) {
         setTrainingPlan(data.plan || null);
         setWeeks(data.weeks || []);
+        await fetchSessionProgressSilently();
 
         const calculatedWeek = getCurrentPlanWeekNumber(
           data.plan || null,
@@ -1041,65 +1107,145 @@ export default function App() {
     }
   }
 
-  function toggleSessionCompleted(session: Session, weekNumber: number, index: number) {
-    if (!authUser?.id) return;
+  async function toggleSessionCompleted(session: Session, weekNumber: number, index: number) {
+    if (!authUser?.id || !authToken) return;
 
-    const key = getSessionKey(session, weekNumber, index);
+    const key = getProgressKey(weekNumber, index);
     const current = completedSessions[key] || { completed: false, pace: "" };
+    const nextCompleted = !current.completed;
+
+    const nextEntry: ManualSessionEntry = {
+      ...current,
+      completed: nextCompleted,
+      completedAt: nextCompleted ? new Date().toISOString() : current.completedAt,
+    };
+
     const next = {
       ...completedSessions,
-      [key]: {
-        ...current,
-        completed: !current.completed,
-        completedAt: !current.completed ? new Date().toISOString() : current.completedAt,
-      },
+      [key]: nextEntry,
     };
 
     setCompletedSessions(next);
-    localStorage.setItem(getCompletedSessionsKey(authUser.id), JSON.stringify(next));
 
-    const week = weeks.find((item) => Number(item.week_number) === Number(weekNumber));
-    const weekSessions = week?.sessions || [];
+    try {
+      const res = await fetch(`${API_URL}/api/session-progress`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${authToken}`,
+        },
+        body: JSON.stringify({
+          trainingPlanId: trainingPlan?.id || null,
+          trainingWeekId: currentWeek?.id || null,
+          trainingSessionId: session.id || null,
+          weekNumber,
+          sessionIndex: index,
+          sessionTitle: session.title,
+          isCompleted: nextCompleted,
+          actualDistanceKm: session.distance_target || null,
+          actualDurationMinutes: session.duration_target || null,
+          actualPaceSecondsPerKm: paceInputToSeconds(nextEntry.pace),
+          notes: null,
+          source: "manual",
+        }),
+      });
 
-    const completedCount = weekSessions.filter((item, itemIndex) => {
-      const itemKey = getSessionKey(item, weekNumber, itemIndex);
-      return Boolean(next[itemKey]?.completed);
-    }).length;
+      const data = await res.json();
 
-    if (
-      weekSessions.length > 0 &&
-      completedCount === weekSessions.length &&
-      weekNumber < weeks.length
-    ) {
-      window.setTimeout(() => {
-        setSelectedWeekNumber(weekNumber + 1);
-        setResult(
-          `Semana ${weekNumber} completada. Avanzaste a la semana ${weekNumber + 1}.`
-        );
-      }, 250);
+      if (!res.ok) {
+        throw new Error(data?.error || "No fue posible guardar progreso");
+      }
+
+      await fetchSessionProgressSilently();
+
+      const week = weeks.find((item) => Number(item.week_number) === Number(weekNumber));
+      const weekSessions = week?.sessions || [];
+
+      const completedCount = weekSessions.filter((_, itemIndex) => {
+        const itemKey = getProgressKey(weekNumber, itemIndex);
+        return Boolean(next[itemKey]?.completed);
+      }).length;
+
+      if (
+        nextCompleted &&
+        weekSessions.length > 0 &&
+        completedCount === weekSessions.length &&
+        weekNumber < weeks.length
+      ) {
+        window.setTimeout(() => {
+          setSelectedWeekNumber(weekNumber + 1);
+          setResult(
+            `Semana ${weekNumber} completada. Avanzaste a la semana ${weekNumber + 1}.`
+          );
+        }, 250);
+      }
+    } catch (error) {
+      setResult(
+        error instanceof Error
+          ? error.message
+          : "No fue posible guardar progreso"
+      );
+
+      await fetchSessionProgressSilently();
     }
   }
 
-  function updateSessionPace(
+  async function updateSessionPace(
     session: Session,
     weekNumber: number,
     index: number,
     value: string
   ) {
-    if (!authUser?.id) return;
+    if (!authUser?.id || !authToken) return;
 
-    const key = getSessionKey(session, weekNumber, index);
+    const key = getProgressKey(weekNumber, index);
     const current = completedSessions[key] || { completed: false, pace: "" };
+
+    const nextEntry: ManualSessionEntry = {
+      ...current,
+      pace: normalizePaceInput(value),
+    };
+
     const next = {
       ...completedSessions,
-      [key]: {
-        ...current,
-        pace: normalizePaceInput(value),
-      },
+      [key]: nextEntry,
     };
 
     setCompletedSessions(next);
-    localStorage.setItem(getCompletedSessionsKey(authUser.id), JSON.stringify(next));
+
+    try {
+      const res = await fetch(`${API_URL}/api/session-progress`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${authToken}`,
+        },
+        body: JSON.stringify({
+          trainingPlanId: trainingPlan?.id || null,
+          trainingWeekId: currentWeek?.id || null,
+          trainingSessionId: session.id || null,
+          weekNumber,
+          sessionIndex: index,
+          sessionTitle: session.title,
+          isCompleted: nextEntry.completed,
+          actualDistanceKm: session.distance_target || null,
+          actualDurationMinutes: session.duration_target || null,
+          actualPaceSecondsPerKm: paceInputToSeconds(nextEntry.pace),
+          notes: null,
+          source: "manual",
+        }),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(data?.error || "No fue posible guardar ritmo");
+      }
+    } catch (error) {
+      setResult(
+        error instanceof Error ? error.message : "No fue posible guardar ritmo"
+      );
+    }
   }
 
   async function saveQuickCheckin() {
@@ -1679,11 +1825,7 @@ export default function App() {
 
                   <div className="session-list">
                     {currentWeek.sessions.map((session, index) => {
-                      const sessionKey = getSessionKey(
-                        session,
-                        currentWeek.week_number,
-                        index
-                      );
+                      const sessionKey = getProgressKey(currentWeek.week_number, index);
                       const sessionEntry = completedSessions[sessionKey];
                       const isCompleted = Boolean(sessionEntry?.completed);
 
