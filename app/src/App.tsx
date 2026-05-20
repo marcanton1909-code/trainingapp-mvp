@@ -501,6 +501,14 @@ export default function App() {
   const [metrics, setMetrics] = useState<MetricsResponse | null>(null);
   const [selectedSession, setSelectedSession] = useState<Session | null>(null);
   const [completedSessions, setCompletedSessions] = useState<Record<string, ManualSessionEntry>>({});
+  const [weeklyCheckin, setWeeklyCheckin] = useState({
+    feeling: "normal",
+    completion: "all",
+    fatigue: 2,
+    soreness: "none",
+    sleep: 4,
+    notes: "",
+  });
   const [result, setResult] = useState("");
 
   const [loading, setLoading] = useState(false);
@@ -1280,6 +1288,49 @@ async function fetchPlanSilently() {
     setLoading(true);
     setResult("");
 
+    const feelingLabels: Record<string, string> = {
+      great: "Muy bien",
+      good: "Bien",
+      normal: "Normal",
+      tired: "Cansado",
+      exhausted: "Muy cansado",
+    };
+
+    const completionLabels: Record<string, string> = {
+      all: "Completé todos los entrenamientos",
+      some: "Completé algunos entrenamientos",
+      none: "No completé entrenamientos",
+    };
+
+    const sorenessLabels: Record<string, string> = {
+      none: "Sin molestias",
+      light: "Molestia leve",
+      strong: "Molestia fuerte",
+    };
+
+    const energyScoreByFeeling: Record<string, number> = {
+      great: 5,
+      good: 4,
+      normal: 3,
+      tired: 2,
+      exhausted: 1,
+    };
+
+    const sorenessScoreByLevel: Record<string, number> = {
+      none: 1,
+      light: 3,
+      strong: 5,
+    };
+
+    const notes = [
+      `Estado: ${feelingLabels[weeklyCheckin.feeling] || weeklyCheckin.feeling}`,
+      `Entrenamientos: ${completionLabels[weeklyCheckin.completion] || weeklyCheckin.completion}`,
+      `Molestias: ${sorenessLabels[weeklyCheckin.soreness] || weeklyCheckin.soreness}`,
+      weeklyCheckin.notes.trim() ? `Comentario: ${weeklyCheckin.notes.trim()}` : "",
+    ]
+      .filter(Boolean)
+      .join(" · ");
+
     try {
       const res = await fetch(`${API_URL}/api/checkins/weekly`, {
         method: "POST",
@@ -1288,13 +1339,13 @@ async function fetchPlanSilently() {
           Authorization: `Bearer ${authToken}`,
         },
         body: JSON.stringify({
-          trainingPlanId: null,
+          trainingPlanId: trainingPlan?.id || null,
           weekNumber: currentWeek?.week_number || 1,
-          energyScore: 4,
-          fatigueScore: 2,
-          sorenessScore: 2,
-          sleepQualityScore: 4,
-          notes: "Check-in rápido desde dashboard.",
+          energyScore: energyScoreByFeeling[weeklyCheckin.feeling] || 3,
+          fatigueScore: Number(weeklyCheckin.fatigue || 3),
+          sorenessScore: sorenessScoreByLevel[weeklyCheckin.soreness] || 1,
+          sleepQualityScore: Number(weeklyCheckin.sleep || 3),
+          notes,
         }),
       });
 
@@ -1369,7 +1420,9 @@ async function fetchPlanSilently() {
               </nav>
             </div>
 
-            <button className="logout-button" onClick={handleLogout}>
+            <SupportNotice compact />
+
+          <button className="logout-button" onClick={handleLogout}>
               Cerrar sesión
             </button>
           </aside>
@@ -1627,15 +1680,106 @@ async function fetchPlanSilently() {
                   <span className="chip cyan">Pro Coach</span>
                   <h2>Seguimiento semanal</h2>
                   <p>
-                    Registra cómo te sentiste y recibe una recomendación semanal
-                    mientras activamos la capa de IA.
+                    Registra cómo te sentiste esta semana para recibir una recomendación
+                    y alimentar los futuros ajustes inteligentes del plan.
                   </p>
+
+                  <div className="checkin-form">
+                    <label className="checkin-field">
+                      <span>¿Cómo te sentiste?</span>
+                      <select
+                        value={weeklyCheckin.feeling}
+                        onChange={(e) =>
+                          setWeeklyCheckin((prev) => ({ ...prev, feeling: e.target.value }))
+                        }
+                      >
+                        <option value="great">Muy bien</option>
+                        <option value="good">Bien</option>
+                        <option value="normal">Normal</option>
+                        <option value="tired">Cansado</option>
+                        <option value="exhausted">Muy cansado</option>
+                      </select>
+                    </label>
+
+                    <label className="checkin-field">
+                      <span>Entrenamientos completados</span>
+                      <select
+                        value={weeklyCheckin.completion}
+                        onChange={(e) =>
+                          setWeeklyCheckin((prev) => ({ ...prev, completion: e.target.value }))
+                        }
+                      >
+                        <option value="all">Todos</option>
+                        <option value="some">Algunos</option>
+                        <option value="none">Ninguno</option>
+                      </select>
+                    </label>
+
+                    <label className="checkin-field">
+                      <span>Fatiga</span>
+                      <select
+                        value={weeklyCheckin.fatigue}
+                        onChange={(e) =>
+                          setWeeklyCheckin((prev) => ({ ...prev, fatigue: Number(e.target.value) }))
+                        }
+                      >
+                        <option value={1}>1 · Muy baja</option>
+                        <option value={2}>2 · Baja</option>
+                        <option value={3}>3 · Media</option>
+                        <option value={4}>4 · Alta</option>
+                        <option value={5}>5 · Muy alta</option>
+                      </select>
+                    </label>
+
+                    <label className="checkin-field">
+                      <span>Molestias</span>
+                      <select
+                        value={weeklyCheckin.soreness}
+                        onChange={(e) =>
+                          setWeeklyCheckin((prev) => ({ ...prev, soreness: e.target.value }))
+                        }
+                      >
+                        <option value="none">No</option>
+                        <option value="light">Sí, leve</option>
+                        <option value="strong">Sí, fuerte</option>
+                      </select>
+                    </label>
+
+                    <label className="checkin-field">
+                      <span>Sueño / recuperación</span>
+                      <select
+                        value={weeklyCheckin.sleep}
+                        onChange={(e) =>
+                          setWeeklyCheckin((prev) => ({ ...prev, sleep: Number(e.target.value) }))
+                        }
+                      >
+                        <option value={1}>1 · Muy mal</option>
+                        <option value={2}>2 · Mal</option>
+                        <option value={3}>3 · Regular</option>
+                        <option value={4}>4 · Bien</option>
+                        <option value={5}>5 · Muy bien</option>
+                      </select>
+                    </label>
+
+                    <label className="checkin-field checkin-field-full">
+                      <span>Comentario opcional</span>
+                      <textarea
+                        rows={3}
+                        placeholder="Ej. Me sentí pesado en la tirada larga o tuve molestia en rodilla."
+                        value={weeklyCheckin.notes}
+                        onChange={(e) =>
+                          setWeeklyCheckin((prev) => ({ ...prev, notes: e.target.value }))
+                        }
+                      />
+                    </label>
+                  </div>
+
                   <button
                     className="primary-button"
                     disabled={loading}
                     onClick={saveQuickCheckin}
                   >
-                    Guardar check-in rápido
+                    {loading ? "Guardando..." : "Guardar check-in semanal"}
                   </button>
                 </div>
               )}
@@ -2130,6 +2274,16 @@ function BrandMark() {
   );
 }
 
+
+function SupportNotice({ compact = false }: { compact?: boolean }) {
+  return (
+    <div className={compact ? "support-notice compact" : "support-notice"}>
+      <span>¿Necesitas soporte?</span>
+      <a href="mailto:hola@trainingapp.run">hola@trainingapp.run</a>
+    </div>
+  );
+}
+
 function NavButton({
   active,
   children,
@@ -2226,6 +2380,8 @@ function PublicLandingIntro({
         <strong>Beta pagada activa</strong>
         <p>{BETA_COPY.long}</p>
       </div>
+
+      <SupportNotice />
     </section>
   );
 }
@@ -3781,6 +3937,103 @@ button:disabled {
     margin-left: 0;
     display: flex;
     width: fit-content;
+  }
+}
+
+
+/* Support and weekly check-in */
+.support-notice {
+  margin-top: 18px;
+  border-radius: 20px;
+  padding: 14px 16px;
+  background: rgba(255,255,255,0.045);
+  border: 1px solid rgba(255,255,255,0.08);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.support-notice span {
+  color: rgba(255,255,255,0.66);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.support-notice a {
+  color: #D6FF4D;
+  font-size: 13px;
+  font-weight: 950;
+  text-decoration: none;
+}
+
+.support-notice a:hover {
+  text-decoration: underline;
+}
+
+.support-notice.compact {
+  margin-top: auto;
+  display: grid;
+  justify-content: stretch;
+  gap: 6px;
+}
+
+.support-notice.compact span,
+.support-notice.compact a {
+  font-size: 12px;
+}
+
+.checkin-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin: 18px 0;
+}
+
+.checkin-field {
+  display: grid;
+  gap: 8px;
+}
+
+.checkin-field-full {
+  grid-column: 1 / -1;
+}
+
+.checkin-field span {
+  color: rgba(255,255,255,0.72);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.checkin-field select,
+.checkin-field textarea {
+  width: 100%;
+  border-radius: 16px;
+  border: 1px solid rgba(255,255,255,0.10);
+  background: rgba(5,8,12,0.72);
+  color: #fff;
+  padding: 13px 14px;
+  font: inherit;
+  outline: none;
+}
+
+.checkin-field textarea {
+  resize: vertical;
+  min-height: 86px;
+}
+
+@media (max-width: 920px) {
+  .support-notice {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .support-notice.compact {
+    margin-top: 14px;
+  }
+
+  .checkin-form {
+    grid-template-columns: 1fr;
   }
 }
 
