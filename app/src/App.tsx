@@ -2133,7 +2133,7 @@ async function fetchPlanSilently() {
                     "Plan estándar por objetivo",
                     "Dashboard básico",
                     "Métricas del plan",
-                    "Sin Strava",
+                    "Métricas manuales",
                   ]}
                   paypalRef={starterRef}
                 />
