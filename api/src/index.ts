@@ -13,6 +13,9 @@ type Bindings = {
   STRAVA_CLIENT_ID: string;
   STRAVA_CLIENT_SECRET: string;
   STRAVA_REDIRECT_URI: string;
+  OPENAI_API_KEY?: string;
+  OPENAI_MODEL?: string;
+  AI_ENABLED?: string;
 };
 
 type AthleteProfileInput = {
@@ -3436,6 +3439,389 @@ app.get("/api/metrics/me", async (c) => {
   }
 });
 
+
+type AiPlanReviewResult = {
+  summary: string;
+  weekly_recommendation: string;
+  risk_level: "low" | "medium" | "high";
+  load_adjustment: "maintain" | "reduce" | "increase";
+  alerts: string[];
+  next_steps: string[];
+  coach_note: string;
+};
+
+function parseAiJsonFromText(text: string): AiPlanReviewResult {
+  const fallback: AiPlanReviewResult = {
+    summary: "Tu plan fue analizado con la información disponible.",
+    weekly_recommendation:
+      "Mantén los entrenamientos suaves realmente suaves y registra tu ritmo para mejorar los próximos ajustes.",
+    risk_level: "low",
+    load_adjustment: "maintain",
+    alerts: [],
+    next_steps: ["Completa la semana actual", "Registra ritmo y check-in semanal"],
+    coach_note: "La recomendación es orientativa y no sustituye atención médica o de un entrenador presencial.",
+  };
+
+  try {
+    const parsed = JSON.parse(text) as Partial<AiPlanReviewResult>;
+    return {
+      summary: String(parsed.summary || fallback.summary),
+      weekly_recommendation: String(
+        parsed.weekly_recommendation || fallback.weekly_recommendation
+      ),
+      risk_level:
+        parsed.risk_level === "medium" || parsed.risk_level === "high"
+          ? parsed.risk_level
+          : "low",
+      load_adjustment:
+        parsed.load_adjustment === "reduce" || parsed.load_adjustment === "increase"
+          ? parsed.load_adjustment
+          : "maintain",
+      alerts: Array.isArray(parsed.alerts)
+        ? parsed.alerts.map(String).slice(0, 5)
+        : [],
+      next_steps: Array.isArray(parsed.next_steps)
+        ? parsed.next_steps.map(String).slice(0, 5)
+        : fallback.next_steps,
+      coach_note: String(parsed.coach_note || fallback.coach_note),
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+function extractOpenAiOutputText(response: any) {
+  if (typeof response?.output_text === "string" && response.output_text.trim()) {
+    return response.output_text;
+  }
+
+  const parts: string[] = [];
+  const output = Array.isArray(response?.output) ? response.output : [];
+
+  for (const item of output) {
+    const content = Array.isArray(item?.content) ? item.content : [];
+
+    for (const block of content) {
+      if (typeof block?.text === "string") parts.push(block.text);
+      if (typeof block?.output_text === "string") parts.push(block.output_text);
+    }
+  }
+
+  return parts.join("\n").trim();
+}
+
+async function getLatestWeeklyCheckin(
+  db: D1Database,
+  userId: string,
+  trainingPlanId: string | null,
+  weekNumber: number
+) {
+  let query = `select
+       week_number, energy_score, fatigue_score, soreness_score,
+       sleep_quality_score, notes, recommendation, created_at
+     from weekly_checkins
+     where user_id = ?1
+       and week_number = ?2`;
+  const bindings: any[] = [userId, weekNumber];
+
+  if (trainingPlanId) {
+    query += ` and (training_plan_id = ?3 or training_plan_id is null)`;
+    bindings.push(trainingPlanId);
+  }
+
+  query += ` order by created_at desc limit 1`;
+
+  return db.prepare(query).bind(...bindings).first();
+}
+
+async function buildAiPlanReviewPayload(
+  db: D1Database,
+  userId: string,
+  requestedWeekNumber?: number
+) {
+  const plan = await db
+    .prepare(
+      `select id, user_id, version, status, start_date, end_date,
+              plan_summary, generation_source, created_at
+       from training_plans
+       where user_id = ?1
+       order by created_at desc
+       limit 1`
+    )
+    .bind(userId)
+    .first<any>();
+
+  if (!plan?.id) {
+    throw new Error("No se encontró un plan activo para analizar.");
+  }
+
+  const profile = await db
+    .prepare(
+      `select
+         experience_level,
+         weekly_days_available,
+         current_weekly_volume,
+         preferred_goal_type,
+         notes
+       from athlete_profiles
+       where user_id = ?1
+       limit 1`
+    )
+    .bind(userId)
+    .first();
+
+  const goal = await db
+    .prepare(
+      `select
+         goal_type,
+         target_distance,
+         target_event_name,
+         target_event_date
+       from goals
+       where user_id = ?1
+       order by created_at desc
+       limit 1`
+    )
+    .bind(userId)
+    .first();
+
+  const weekRows = await db
+    .prepare(
+      `select id, week_number, focus_label, total_target_distance, notes
+       from training_weeks
+       where training_plan_id = ?1
+       order by week_number asc`
+    )
+    .bind(plan.id)
+    .all<any>();
+
+  const weeks = weekRows.results || [];
+
+  if (!weeks.length) {
+    throw new Error("No hay semanas disponibles para analizar.");
+  }
+
+  const selectedWeek =
+    weeks.find((week: any) => Number(week.week_number) === Number(requestedWeekNumber)) ||
+    weeks[0];
+
+  const sessionRows = await db
+    .prepare(
+      `select id, day_of_week, session_type, title, objective,
+              distance_target, duration_target, intensity_zone,
+              warmup_text, main_set_text, cooldown_text, estimated_load, status
+       from training_sessions
+       where training_week_id = ?1
+       order by rowid asc`
+    )
+    .bind((selectedWeek as any).id)
+    .all<any>();
+
+  const progressRows = await db
+    .prepare(
+      `select week_number, session_index, session_title, is_completed,
+              completed_at, actual_distance_km, actual_duration_minutes,
+              actual_pace_seconds_per_km, effort_score, notes, source, updated_at
+       from training_session_progress
+       where user_id = ?1
+         and week_number = ?2
+       order by session_index asc`
+    )
+    .bind(userId, Number((selectedWeek as any).week_number || 1))
+    .all<any>();
+
+  const latestCheckin = await getLatestWeeklyCheckin(
+    db,
+    userId,
+    plan.id,
+    Number((selectedWeek as any).week_number || 1)
+  );
+
+  return {
+    plan,
+    profile,
+    goal,
+    week: selectedWeek,
+    sessions: sessionRows.results || [],
+    progress: progressRows.results || [],
+    latestCheckin,
+    allWeeksSummary: weeks.map((week: any) => ({
+      week_number: week.week_number,
+      focus_label: week.focus_label,
+      total_target_distance: week.total_target_distance,
+      notes: week.notes,
+    })),
+  };
+}
+
+function fallbackPlanReview(payload: any): AiPlanReviewResult {
+  const progress = Array.isArray(payload.progress) ? payload.progress : [];
+  const sessions = Array.isArray(payload.sessions) ? payload.sessions : [];
+  const completed = progress.filter((item: any) => Number(item.is_completed) === 1).length;
+  const total = sessions.length || 1;
+  const completionRate = completed / total;
+  const checkin = payload.latestCheckin as any;
+  const fatigue = Number(checkin?.fatigue_score || 0);
+  const soreness = Number(checkin?.soreness_score || 0);
+  const sleep = Number(checkin?.sleep_quality_score || 0);
+
+  if (fatigue >= 4 || soreness >= 4 || sleep <= 2) {
+    return {
+      summary: `Semana ${payload.week?.week_number || ""}: carga con señales de fatiga alta o recuperación limitada.`,
+      weekly_recommendation:
+        "Reduce la intensidad de las próximas sesiones y mantén los rodajes en zona cómoda. Prioriza sueño, movilidad y recuperación.",
+      risk_level: "high",
+      load_adjustment: "reduce",
+      alerts: [
+        "Fatiga o molestias elevadas en el check-in",
+        "Evita convertir rodajes suaves en sesiones rápidas",
+      ],
+      next_steps: [
+        "Baja 15-25% la intensidad esta semana",
+        "Registra ritmo y sensaciones después de cada sesión",
+        "Si hay dolor fuerte, pausa la intensidad y revisa la molestia",
+      ],
+      coach_note:
+        "Esta recomendación es orientativa. Si hay dolor persistente o fuerte, consulta a un profesional.",
+    };
+  }
+
+  if (completionRate >= 0.85) {
+    return {
+      summary: `Semana ${payload.week?.week_number || ""}: buena adherencia al plan.`,
+      weekly_recommendation:
+        "Mantén la estructura actual. Si las sesiones suaves se sienten controladas, puedes continuar con la siguiente semana según lo planeado.",
+      risk_level: "low",
+      load_adjustment: "maintain",
+      alerts: [],
+      next_steps: [
+        "Completa la semana sin forzar ritmos",
+        "Mantén la tirada larga en esfuerzo cómodo",
+        "Haz el check-in semanal al terminar la semana",
+      ],
+      coach_note:
+        "La clave es sostener consistencia antes de subir carga. No conviertas todos los entrenamientos en pruebas de ritmo.",
+    };
+  }
+
+  return {
+    summary: `Semana ${payload.week?.week_number || ""}: adherencia parcial o datos todavía incompletos.`,
+    weekly_recommendation:
+      "Mantén la carga actual antes de subir volumen. Completa las sesiones clave y registra ritmo para mejorar el ajuste.",
+    risk_level: "medium",
+    load_adjustment: "maintain",
+    alerts: ["Faltan datos o sesiones por completar"],
+    next_steps: [
+      "Prioriza completar las sesiones suaves",
+      "Registra ritmo por km en cada entrenamiento",
+      "No subas carga hasta completar mejor la semana",
+    ],
+    coach_note:
+      "Con más datos de ritmo, sesiones realizadas y check-in, la recomendación será más precisa.",
+  };
+}
+
+async function generateAiPlanReview(
+  c: Context<{ Bindings: Bindings }>,
+  payload: any
+): Promise<{
+  review: AiPlanReviewResult;
+  model: string;
+  usedFallback: boolean;
+}> {
+  const model = c.env.OPENAI_MODEL || "gpt-4.1-mini";
+  const aiEnabled = String(c.env.AI_ENABLED || "false").toLowerCase() === "true";
+
+  if (!aiEnabled || !c.env.OPENAI_API_KEY) {
+    return {
+      review: fallbackPlanReview(payload),
+      model: "fallback-rules",
+      usedFallback: true,
+    };
+  }
+
+  const schema = {
+    type: "object",
+    additionalProperties: false,
+    required: [
+      "summary",
+      "weekly_recommendation",
+      "risk_level",
+      "load_adjustment",
+      "alerts",
+      "next_steps",
+      "coach_note",
+    ],
+    properties: {
+      summary: { type: "string" },
+      weekly_recommendation: { type: "string" },
+      risk_level: { type: "string", enum: ["low", "medium", "high"] },
+      load_adjustment: {
+        type: "string",
+        enum: ["maintain", "reduce", "increase"],
+      },
+      alerts: {
+        type: "array",
+        items: { type: "string" },
+        maxItems: 5,
+      },
+      next_steps: {
+        type: "array",
+        items: { type: "string" },
+        maxItems: 5,
+      },
+      coach_note: { type: "string" },
+    },
+  };
+
+  const response = await fetch("https://api.openai.com/v1/responses", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${c.env.OPENAI_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model,
+      input: [
+        {
+          role: "system",
+          content:
+            "Eres un coach de running prudente. Analiza el plan de entrenamiento, el progreso manual y el check-in. Devuelve recomendaciones prácticas en español. No prometas resultados médicos. No recomiendes aumentar carga si hay dolor, fatiga alta o poca adherencia.",
+        },
+        {
+          role: "user",
+          content: JSON.stringify(payload),
+        },
+      ],
+      text: {
+        format: {
+          type: "json_schema",
+          name: "training_plan_review",
+          schema,
+          strict: true,
+        },
+      },
+    }),
+  });
+
+  const data = (await response.json()) as any;
+
+  if (!response.ok) {
+    throw new Error(
+      data?.error?.message || "No fue posible generar el análisis con IA"
+    );
+  }
+
+  const outputText = extractOpenAiOutputText(data);
+  const review = parseAiJsonFromText(outputText);
+
+  return {
+    review,
+    model,
+    usedFallback: false,
+  };
+}
+
 app.post("/api/checkins/weekly", async (c) => {
   try {
     const auth = await requireAuthenticatedUser(c);
@@ -4102,6 +4488,75 @@ app.post("/api/mercadopago/webhook", async (c) => {
 });
 
 
+
+
+
+app.post("/api/ai/plan-review", async (c) => {
+  try {
+    const auth = await requireAuthenticatedUser(c);
+
+    if (!auth) {
+      return jsonError(c, "No autenticado", 401);
+    }
+
+    const membership = await getLatestMembership(c.env.DB, auth.user.id);
+    if (membership?.status !== "active") {
+      return jsonError(c, "Se requiere una membresía activa para usar IA.", 403);
+    }
+
+    const body = (await c.req.json().catch(() => ({}))) as {
+      weekNumber?: number;
+    };
+
+    const payload = await buildAiPlanReviewPayload(
+      c.env.DB,
+      auth.user.id,
+      body.weekNumber
+    );
+
+    const aiResult = await generateAiPlanReview(c, payload);
+    const now = new Date().toISOString();
+    const reviewId = crypto.randomUUID();
+
+    await c.env.DB
+      .prepare(
+        `insert into ai_plan_reviews (
+          id, user_id, training_plan_id, week_number,
+          request_json, response_json, model, created_at
+        ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)`
+      )
+      .bind(
+        reviewId,
+        auth.user.id,
+        payload.plan.id,
+        Number((payload.week as any)?.week_number || body.weekNumber || 1),
+        JSON.stringify(payload),
+        JSON.stringify(aiResult.review),
+        aiResult.model,
+        now
+      )
+      .run();
+
+    return c.json({
+      ok: true,
+      reviewId,
+      model: aiResult.model,
+      usedFallback: aiResult.usedFallback,
+      review: aiResult.review,
+    });
+  } catch (error) {
+    return c.json(
+      {
+        ok: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : "No fue posible generar análisis inteligente",
+      },
+      500
+    );
+  }
+});
 
 
 app.get("/api/session-progress/me", async (c) => {

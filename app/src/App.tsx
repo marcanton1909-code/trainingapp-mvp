@@ -140,6 +140,19 @@ type ManualMetrics = {
   trainingLoadScore: number;
 };
 
+
+type AiPlanReview = {
+  summary: string;
+  weekly_recommendation: string;
+  risk_level: "low" | "medium" | "high";
+  load_adjustment: "maintain" | "reduce" | "increase";
+  alerts: string[];
+  next_steps: string[];
+  coach_note: string;
+};
+
+
+
 declare global {
   interface Window {
     paypal?: {
@@ -492,6 +505,19 @@ function getOrderedTrainingSessions(sessions?: Session[] | null) {
   });
 }
 
+
+function getAiRiskLabel(value: AiPlanReview["risk_level"]) {
+  if (value === "high") return "alto";
+  if (value === "medium") return "medio";
+  return "bajo";
+}
+
+function getAiAdjustmentLabel(value: AiPlanReview["load_adjustment"]) {
+  if (value === "reduce") return "reducir carga";
+  if (value === "increase") return "subir con cuidado";
+  return "mantener";
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<TabMode>("login");
   const [authLoading, setAuthLoading] = useState(true);
@@ -541,6 +567,9 @@ export default function App() {
     sleep: 4,
     notes: "",
   });
+  const [aiReview, setAiReview] = useState<AiPlanReview | null>(null);
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiError, setAiError] = useState("");
   const [result, setResult] = useState("");
 
   const [loading, setLoading] = useState(false);
@@ -603,6 +632,11 @@ export default function App() {
       ),
     [currentSessions, completedSessions, currentWeek?.week_number]
   );
+
+  useEffect(() => {
+    setAiReview(null);
+    setAiError("");
+  }, [currentWeek?.week_number]);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -1314,6 +1348,47 @@ async function fetchPlanSilently() {
     }
   }
 
+
+  async function analyzeWeeklyPlan() {
+    if (!authToken || !currentWeek) return;
+
+    setAiLoading(true);
+    setAiError("");
+    setResult("");
+
+    try {
+      const res = await fetch(`${API_URL}/api/ai/plan-review`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${authToken}`,
+        },
+        body: JSON.stringify({
+          weekNumber: currentWeek.week_number,
+        }),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(data?.error || "No fue posible analizar tu semana");
+      }
+
+      setAiReview(data.review || null);
+      setResult(
+        data.usedFallback
+          ? "Análisis generado con reglas temporales. Revisa configuración de IA si esperabas respuesta del modelo."
+          : "Análisis inteligente generado correctamente."
+      );
+    } catch (error) {
+      setAiError(
+        error instanceof Error ? error.message : "No fue posible analizar tu semana"
+      );
+    } finally {
+      setAiLoading(false);
+    }
+  }
+
   async function saveQuickCheckin() {
     if (!authToken) return;
 
@@ -2003,6 +2078,63 @@ async function fetchPlanSilently() {
                       <strong>{currentWeek.total_target_distance} km</strong>
 
                     </div>
+                  </div>
+
+                  <div className="ai-review-card">
+                    <div>
+                      <span className="chip cyan">IA entrenamiento</span>
+                      <h2>Análisis inteligente de la semana</h2>
+                      <p>
+                        Revisa tu semana actual con base en el plan, sesiones realizadas,
+                        ritmo registrado y check-in semanal.
+                      </p>
+                    </div>
+
+                    <button
+                      className="ghost-button"
+                      disabled={aiLoading}
+                      onClick={analyzeWeeklyPlan}
+                    >
+                      {aiLoading ? "Analizando..." : "Analizar mi semana"}
+                    </button>
+
+                    {aiError && <div className="ai-error">{aiError}</div>}
+
+                    {aiReview && (
+                      <div className="ai-review-result">
+                        <strong>{aiReview.summary}</strong>
+                        <p>{aiReview.weekly_recommendation}</p>
+
+                        <div className="ai-review-tags">
+                          <span>Riesgo: {getAiRiskLabel(aiReview.risk_level)}</span>
+                          <span>Ajuste: {getAiAdjustmentLabel(aiReview.load_adjustment)}</span>
+                        </div>
+
+                        {aiReview.alerts.length > 0 && (
+                          <div>
+                            <b>Alertas</b>
+                            <ul>
+                              {aiReview.alerts.map((alert, index) => (
+                                <li key={`alert-${index}`}>{alert}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+
+                        {aiReview.next_steps.length > 0 && (
+                          <div>
+                            <b>Siguientes pasos</b>
+                            <ul>
+                              {aiReview.next_steps.map((step, index) => (
+                                <li key={`step-${index}`}>{step}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+
+                        <em>{aiReview.coach_note}</em>
+                      </div>
+                    )}
                   </div>
 
                   <div className="session-list">
@@ -4067,6 +4199,86 @@ button:disabled {
   .checkin-form {
     grid-template-columns: 1fr;
   }
+}
+
+
+/* AI weekly review */
+.ai-review-card {
+  display: grid;
+  gap: 16px;
+  margin: 18px 0 20px;
+  padding: 20px;
+  border-radius: 26px;
+  background:
+    radial-gradient(circle at top left, rgba(0,230,255,0.12), transparent 32%),
+    linear-gradient(135deg, rgba(255,255,255,0.055), rgba(255,255,255,0.032));
+  border: 1px solid rgba(0,230,255,0.14);
+}
+
+.ai-review-card h2 {
+  margin: 12px 0 0;
+  font-size: 22px;
+}
+
+.ai-review-card p {
+  margin: 8px 0 0;
+  color: rgba(255,255,255,0.68);
+  line-height: 1.55;
+}
+
+.ai-review-result {
+  display: grid;
+  gap: 12px;
+  border-top: 1px solid rgba(255,255,255,0.08);
+  padding-top: 16px;
+}
+
+.ai-review-result strong {
+  color: #fff;
+  font-size: 17px;
+}
+
+.ai-review-result b {
+  display: block;
+  color: #D6FF4D;
+  font-size: 13px;
+  margin-bottom: 6px;
+}
+
+.ai-review-result ul {
+  margin: 0;
+  padding-left: 18px;
+  color: rgba(255,255,255,0.72);
+  line-height: 1.55;
+  font-size: 13px;
+}
+
+.ai-review-result em {
+  color: rgba(255,255,255,0.56);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.ai-review-tags {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.ai-review-tags span,
+.ai-error {
+  border-radius: 999px;
+  padding: 8px 11px;
+  background: rgba(214,255,77,0.10);
+  color: #D6FF4D;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.ai-error {
+  border-radius: 16px;
+  background: rgba(255,89,89,0.12);
+  color: #ff9f9f;
 }
 
 `;
