@@ -1974,7 +1974,7 @@ async function fetchPlanSilently() {
                   </div>
 
                   <div className="session-list">
-                    {currentWeek.sessions.map((session, index) => {
+                    {currentSessions.map((session, index) => {
                       const sessionKey = getProgressKey(currentWeek.week_number, index);
                       const sessionEntry = completedSessions[sessionKey];
                       const isCompleted = Boolean(sessionEntry?.completed);
