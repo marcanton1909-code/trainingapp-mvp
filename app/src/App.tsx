@@ -460,6 +460,38 @@ function isStravaReviewEnabled() {
   return new URLSearchParams(window.location.search).get(STRAVA_REVIEW_QUERY_PARAM) === "1";
 }
 
+
+const TRAINING_DAY_ORDER: Record<string, number> = {
+  lunes: 1,
+  martes: 2,
+  miercoles: 3,
+  jueves: 4,
+  viernes: 5,
+  sabado: 6,
+  domingo: 7,
+};
+
+function getTrainingDayOrder(day?: string | null) {
+  const normalized = String(day || "")
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+
+  return TRAINING_DAY_ORDER[normalized] || 99;
+}
+
+function getOrderedTrainingSessions(sessions?: Session[] | null) {
+  return [...(sessions || [])].sort((a, b) => {
+    const dayDiff =
+      getTrainingDayOrder(a.day_of_week) - getTrainingDayOrder(b.day_of_week);
+
+    if (dayDiff !== 0) return dayDiff;
+
+    return String(a.title || "").localeCompare(String(b.title || ""));
+  });
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<TabMode>("login");
   const [authLoading, setAuthLoading] = useState(true);
@@ -550,7 +582,7 @@ export default function App() {
     [weeks, visibleWeekNumber]
   );
 
-  const currentSessions = currentWeek?.sessions || [];
+  const currentSessions = getOrderedTrainingSessions(currentWeek?.sessions || []);
   const highlightedSession =
     currentSessions.find((_, index) => {
       const key = getProgressKey(currentWeek?.week_number || 1, index);
@@ -1974,7 +2006,7 @@ async function fetchPlanSilently() {
                   </div>
 
                   <div className="session-list">
-                    {currentSessions.map((session, index) => {
+                    {getOrderedTrainingSessions(currentSessions).map((session, index) => {
                       const sessionKey = getProgressKey(currentWeek.week_number, index);
                       const sessionEntry = completedSessions[sessionKey];
                       const isCompleted = Boolean(sessionEntry?.completed);
