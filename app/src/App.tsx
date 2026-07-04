@@ -124,6 +124,8 @@ type ManualSessionEntry = {
   completed: boolean;
   pace: string;
   completedAt?: string;
+  missed?: boolean;
+  missedAt?: string;
 };
 
 type ManualMetrics = {
@@ -828,6 +830,16 @@ export default function App() {
           completed: Boolean(row.is_completed),
           completedAt: row.completed_at || undefined,
           pace: secondsToPaceInput(row.actual_pace_seconds_per_km),
+          missed:
+            !Boolean(row.is_completed) &&
+            (row.source === "manual_missed" ||
+              String(row.notes || "").includes("Entrenamiento no realizado")),
+          missedAt:
+            !Boolean(row.is_completed) &&
+            (row.source === "manual_missed" ||
+              String(row.notes || "").includes("Entrenamiento no realizado"))
+              ? row.updated_at || row.completed_at || undefined
+              : undefined,
         };
       });
 
@@ -1219,6 +1231,8 @@ async function fetchPlanSilently() {
       ...current,
       completed: nextCompleted,
       completedAt: nextCompleted ? new Date().toISOString() : current.completedAt,
+      missed: false,
+      missedAt: undefined,
     };
 
     const next = {
@@ -1247,7 +1261,7 @@ async function fetchPlanSilently() {
           actualDurationMinutes: session.duration_target || null,
           actualPaceSecondsPerKm: paceInputToSeconds(nextEntry.pace),
           notes: null,
-          source: "manual",
+          source: nextCompleted ? "manual_completed" : "manual",
         }),
       });
 
@@ -1290,6 +1304,80 @@ async function fetchPlanSilently() {
     }
   }
 
+  async function markSessionMissed(
+    session: Session,
+    weekNumber: number,
+    index: number
+  ) {
+    if (!authUser?.id || !authToken) return;
+
+    const key = getProgressKey(weekNumber, index);
+    const current = completedSessions[key] || { completed: false, pace: "" };
+    const nextMissed = !current.missed;
+
+    const nextEntry: ManualSessionEntry = {
+      ...current,
+      completed: false,
+      completedAt: undefined,
+      missed: nextMissed,
+      missedAt: nextMissed ? new Date().toISOString() : undefined,
+      pace: nextMissed ? "" : current.pace,
+    };
+
+    const next = {
+      ...completedSessions,
+      [key]: nextEntry,
+    };
+
+    setCompletedSessions(next);
+
+    try {
+      const res = await fetch(`${API_URL}/api/session-progress`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${authToken}`,
+        },
+        body: JSON.stringify({
+          trainingPlanId: trainingPlan?.id || null,
+          trainingWeekId: currentWeek?.id || null,
+          trainingSessionId: session.id || null,
+          weekNumber,
+          sessionIndex: index,
+          sessionTitle: session.title,
+          isCompleted: false,
+          actualDistanceKm: null,
+          actualDurationMinutes: null,
+          actualPaceSecondsPerKm: null,
+          notes: nextMissed ? "Entrenamiento no realizado" : null,
+          source: nextMissed ? "manual_missed" : "manual",
+        }),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(data?.error || "No fue posible guardar el entrenamiento perdido");
+      }
+
+      await fetchSessionProgressSilently();
+
+      setResult(
+        nextMissed
+          ? "Entrenamiento marcado como no realizado."
+          : "Marca de entrenamiento no realizado eliminada."
+      );
+    } catch (error) {
+      setResult(
+        error instanceof Error
+          ? error.message
+          : "No fue posible guardar el entrenamiento perdido"
+      );
+
+      await fetchSessionProgressSilently();
+    }
+  }
+
   async function updateSessionPace(
     session: Session,
     weekNumber: number,
@@ -1304,6 +1392,8 @@ async function fetchPlanSilently() {
     const nextEntry: ManualSessionEntry = {
       ...current,
       pace: normalizePaceInput(value),
+      missed: false,
+      missedAt: undefined,
     };
 
     const next = {
@@ -2142,10 +2232,11 @@ async function fetchPlanSilently() {
                       const sessionKey = getProgressKey(currentWeek.week_number, index);
                       const sessionEntry = completedSessions[sessionKey];
                       const isCompleted = Boolean(sessionEntry?.completed);
+                      const isMissed = Boolean(sessionEntry?.missed);
 
                       return (
                         <div
-                          className={isCompleted ? "session-card completed" : "session-card"}
+                          className={isCompleted ? "session-card completed" : isMissed ? "session-card missed" : "session-card"}
                           key={session.id || index}
                         >
                           <button
@@ -2154,7 +2245,7 @@ async function fetchPlanSilently() {
                           >
                             <div className="session-top">
                               <span>{session.day_of_week || "Sesión"}</span>
-                              <em>{isCompleted ? "Realizada" : session.intensity_zone || "General"}</em>
+                              <em>{isCompleted ? "Realizada" : isMissed ? "No realizado" : session.intensity_zone || "General"}</em>
                             </div>
                             <h3>{session.title}</h3>
                             <p>
@@ -2176,6 +2267,7 @@ async function fetchPlanSilently() {
                                 autoComplete="off"
                                 placeholder="5:45"
                                 value={sessionEntry?.pace || ""}
+                                disabled={isMissed}
                                 onChange={(e) =>
                                   updateSessionPace(
                                     session,
@@ -2198,6 +2290,19 @@ async function fetchPlanSilently() {
                               }
                             >
                               {isCompleted ? "Realizada ✓" : "Marcar realizada"}
+                            </button>
+
+                            <button
+                              className={isMissed ? "missed-button active" : "missed-button"}
+                              onClick={() =>
+                                markSessionMissed(
+                                  session,
+                                  currentWeek.week_number,
+                                  index
+                                )
+                              }
+                            >
+                              {isMissed ? "No realizado ✓" : "No realizado"}
                             </button>
                           </div>
                         </div>
@@ -4279,6 +4384,36 @@ button:disabled {
   border-radius: 16px;
   background: rgba(255,89,89,0.12);
   color: #ff9f9f;
+}
+
+
+/* Missed training state */
+.session-card.missed {
+  border-color: rgba(255,184,77,0.24);
+  background: rgba(255,184,77,0.07);
+}
+
+.missed-button {
+  width: fit-content;
+  border: 1px solid rgba(255,184,77,0.18);
+  background: rgba(255,184,77,0.08);
+  color: rgba(255,220,170,0.92);
+  border-radius: 14px;
+  padding: 10px 12px;
+  font-size: 12px;
+  font-weight: 950;
+  cursor: pointer;
+}
+
+.missed-button.active {
+  border-color: rgba(255,184,77,0.34);
+  background: rgba(255,184,77,0.16);
+  color: #FFB84D;
+}
+
+.pace-field input:disabled {
+  opacity: 0.52;
+  cursor: not-allowed;
 }
 
 `;
