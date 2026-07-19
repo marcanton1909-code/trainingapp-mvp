@@ -2018,6 +2018,7 @@ async function fetchPlanSilently() {
                       <option>Completar una carrera</option>
                       <option>Mejorar tiempo</option>
                       <option>Retomar constancia</option>
+                      <option>Recuperar condición</option>
                     </select>
                   </Field>
 

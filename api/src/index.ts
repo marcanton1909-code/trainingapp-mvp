@@ -46,6 +46,22 @@ type SessionSeed = {
   status: string;
 };
 
+type WorkoutLibraryItem = {
+  id: string;
+  level_key: string;
+  level_label?: string | null;
+  day_slot: number;
+  session_type: string;
+  title: string;
+  objective?: string | null;
+  intensity_zone?: string | null;
+  main_set_template: string;
+  library_block?: string | null;
+  min_days_per_week?: number | null;
+  max_days_per_week?: number | null;
+  sort_order?: number | null;
+};
+
 type MercadoPagoPreapproval = {
   id?: string;
   status?: string;
@@ -512,6 +528,185 @@ function getLongRunTarget(input: AthleteProfileInput, weekNumber: number, totalW
   return roundToHalf(clamp(longRun, 3.5, Math.min(config.longRunPeak, maxByWeeklyVolume)));
 }
 
+function normalizeWorkoutLibraryLevel(level: string) {
+  const normalized = String(level || "").toLowerCase().trim();
+
+  if (
+    normalized.includes("básico") ||
+    normalized.includes("basico") ||
+    normalized.includes("principiante") ||
+    normalized === "basic"
+  ) {
+    return "basic";
+  }
+
+  if (normalized.includes("intermedio") || normalized === "intermediate") {
+    return "intermediate";
+  }
+
+  if (normalized === "medio" || normalized === "medium") {
+    return "medium";
+  }
+
+  if (
+    normalized.includes("avanzado") ||
+    normalized.includes("avanzando") ||
+    normalized === "advanced"
+  ) {
+    return "advanced";
+  }
+
+  if (normalized.includes("experto") || normalized === "expert") {
+    return "expert";
+  }
+
+  return "intermediate";
+}
+
+function getWorkoutLibraryLevelFallbacks(level: string) {
+  const key = normalizeWorkoutLibraryLevel(level);
+  const fallbackMap: Record<string, string[]> = {
+    basic: ["basic", "intermediate"],
+    intermediate: ["intermediate", "medium", "basic"],
+    medium: ["medium", "intermediate", "advanced"],
+    advanced: ["advanced", "medium", "expert"],
+    expert: ["expert", "advanced", "medium"],
+  };
+
+  return fallbackMap[key] || ["intermediate", "medium"];
+}
+
+function getPreferredLibraryTypes(sessionType: string) {
+  const normalized = String(sessionType || "").toLowerCase();
+
+  if (normalized.includes("easy") || normalized.includes("recovery")) {
+    return ["easy_run", "continuous_run"];
+  }
+
+  if (normalized.includes("long")) {
+    return ["long_run", "easy_run", "continuous_run"];
+  }
+
+  if (normalized.includes("tempo")) {
+    return ["tempo", "progression", "continuous_run"];
+  }
+
+  if (normalized.includes("quality")) {
+    return ["intervals", "fartlek", "tempo", "quality", "progression"];
+  }
+
+  return [normalized, "quality", "tempo", "easy_run"];
+}
+
+function chooseWorkoutLibraryItem(
+  library: WorkoutLibraryItem[],
+  input: AthleteProfileInput,
+  session: SessionSeed,
+  daySlot: number,
+  weekNumber: number,
+  daysPerWeek: number
+) {
+  if (!library.length) return null;
+
+  const levelFallbacks = getWorkoutLibraryLevelFallbacks(input.level);
+  const preferredTypes = getPreferredLibraryTypes(session.session_type);
+
+  const isAllowedForDays = (item: WorkoutLibraryItem) => {
+    const minDays = Number(item.min_days_per_week || 3);
+    const maxDays = Number(item.max_days_per_week || 6);
+    return daysPerWeek >= minDays && daysPerWeek <= maxDays;
+  };
+
+  const matchScore = (item: WorkoutLibraryItem) => {
+    let score = 0;
+    const levelIndex = levelFallbacks.indexOf(item.level_key);
+    if (levelIndex >= 0) score += 100 - levelIndex * 12;
+    if (Number(item.day_slot) === daySlot) score += 35;
+    const typeIndex = preferredTypes.indexOf(item.session_type);
+    if (typeIndex >= 0) score += 45 - typeIndex * 8;
+    if (isAllowedForDays(item)) score += 10;
+    return score;
+  };
+
+  const candidates = library
+    .filter((item) => levelFallbacks.includes(item.level_key))
+    .filter((item) => preferredTypes.includes(item.session_type) || Number(item.day_slot) === daySlot)
+    .sort((a, b) => {
+      const byScore = matchScore(b) - matchScore(a);
+      if (byScore !== 0) return byScore;
+      return Number(a.sort_order || 0) - Number(b.sort_order || 0);
+    });
+
+  if (!candidates.length) return null;
+
+  const topScore = matchScore(candidates[0]);
+  const best = candidates.filter((item) => matchScore(item) === topScore);
+  return best[(weekNumber - 1) % best.length] || candidates[0];
+}
+
+function applyWorkoutLibraryReference(
+  session: SessionSeed,
+  input: AthleteProfileInput,
+  library: WorkoutLibraryItem[],
+  sessionIndex: number,
+  weekNumber: number,
+  daysPerWeek: number
+) {
+  if (!library.length) return session;
+
+  const isLongRun = session.session_type === "long_run";
+  const daySlot = isLongRun ? 5 : Math.min(sessionIndex + 1, 5);
+  const item = chooseWorkoutLibraryItem(
+    library,
+    input,
+    session,
+    daySlot,
+    weekNumber,
+    daysPerWeek
+  );
+
+  if (!item) return session;
+
+  const block = String(item.main_set_template || item.library_block || "").trim();
+  const distanceText = session.distance_target
+    ? ` Ajuste para este plan: ${session.distance_target} km objetivo.`
+    : "";
+
+  const shouldKeepLongRunText =
+    isLongRun && block.toUpperCase().includes("DISTANCIA DEPENDIENDO OBJETIVO");
+
+  return {
+    ...session,
+    session_type: item.session_type || session.session_type,
+    title: shouldKeepLongRunText ? session.title : item.title || session.title,
+    objective: item.objective || session.objective,
+    intensity_zone: item.intensity_zone || session.intensity_zone,
+    main_set_text: shouldKeepLongRunText
+      ? session.main_set_text
+      : `Referencia biblioteca Peak Pulse: ${block}.${distanceText}`,
+  };
+}
+
+async function fetchWorkoutLibrary(db: D1Database) {
+  try {
+    const result = await db
+      .prepare(
+        `select id, level_key, level_label, day_slot, session_type, title, objective,
+                intensity_zone, main_set_template, library_block,
+                min_days_per_week, max_days_per_week, sort_order
+         from training_workout_library
+         where is_active = 1
+         order by level_key, day_slot, sort_order`
+      )
+      .all<WorkoutLibraryItem>();
+
+    return result.results || [];
+  } catch (error) {
+    console.warn("Workout library not available, using default generator", error);
+    return [];
+  }
+}
+
 function makeSession(seed: SessionSeed): SessionSeed {
   return seed;
 }
@@ -535,6 +730,275 @@ function buildQualityMainSet(distanceKm: number, weekNumber: number, qualityKm: 
   return `Repeticiones en subida o progresiones controladas dentro de ${qualityKm} km, cuidando técnica y postura`;
 }
 
+
+function normalizeGoalText(goal: string) {
+  return String(goal || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .trim();
+}
+
+function isRecoverFitnessGoal(goal: string) {
+  const clean = normalizeGoalText(goal);
+  return (
+    clean === "recover_fitness" ||
+    clean.includes("recuperar condicion") ||
+    clean.includes("recuperar base") ||
+    clean.includes("volver a entrenar")
+  );
+}
+
+function getRecoverFitnessWeeks() {
+  return 8;
+}
+
+function getRecoverFitnessLevelKey(level: string) {
+  const clean = normalizeGoalText(level);
+
+  if (
+    clean.includes("basico") ||
+    clean.includes("principiante") ||
+    clean.includes("basic")
+  ) {
+    return "basic";
+  }
+
+  if (
+    clean.includes("avanzado") ||
+    clean.includes("advanced") ||
+    clean.includes("experto")
+  ) {
+    return "advanced";
+  }
+
+  return "intermediate";
+}
+
+function getRecoverFitnessVolumeRange(level: string, daysPerWeek: number) {
+  const days = clamp(Number(daysPerWeek || 4), 3, 6);
+  const levelKey = getRecoverFitnessLevelKey(level);
+
+  const ranges: Record<string, Record<number, { min: number; max: number }>> = {
+    basic: {
+      3: { min: 8, max: 12 },
+      4: { min: 12, max: 16 },
+      5: { min: 15, max: 22 },
+      6: { min: 18, max: 26 },
+    },
+    intermediate: {
+      3: { min: 15, max: 20 },
+      4: { min: 20, max: 28 },
+      5: { min: 25, max: 35 },
+      6: { min: 30, max: 42 },
+    },
+    advanced: {
+      3: { min: 22, max: 30 },
+      4: { min: 30, max: 40 },
+      5: { min: 38, max: 50 },
+      6: { min: 42, max: 58 },
+    },
+  };
+
+  return ranges[levelKey][days] || ranges.intermediate[4];
+}
+
+function getRecoverFitnessWeeklyVolume(
+  input: AthleteProfileInput,
+  weekNumber: number,
+  totalWeeks: number
+) {
+  const days = clamp(Number(input.daysPerWeek || 4), 3, 6);
+  const range = getRecoverFitnessVolumeRange(input.level, days);
+  const currentVolume = Number(input.currentVolumeKm || 0);
+
+  const safeStart =
+    currentVolume > 0
+      ? clamp(currentVolume * 0.65, range.min, range.max * 0.82)
+      : range.min;
+
+  const ratio = getWeekProgressRatio(weekNumber, totalWeeks);
+  let target = safeStart + (range.max - safeStart) * Math.pow(ratio, 0.85);
+
+  if (weekNumber % 4 === 0 && weekNumber < totalWeeks) {
+    target *= 0.85;
+  }
+
+  return roundToHalf(clamp(target, range.min * 0.8, range.max));
+}
+
+function getRecoverFitnessProgressionType(weekNumber: number, level: string) {
+  const levelKey = getRecoverFitnessLevelKey(level);
+
+  if (weekNumber <= 2) return "strides";
+  if (levelKey === "basic") return weekNumber >= 5 ? "progression" : "strides";
+  if (levelKey === "advanced") return weekNumber >= 4 ? "controlled_fartlek" : "progression";
+
+  return weekNumber >= 4 ? "progression" : "strides";
+}
+
+function buildRecoverFitnessSessionsForWeek(
+  input: AthleteProfileInput,
+  weekNumber: number,
+  totalWeeks: number,
+  workoutLibrary: WorkoutLibraryItem[] = []
+): SessionSeed[] {
+  const days = clamp(Number(input.daysPerWeek || 4), 3, 6);
+  const weeklyVolume = getRecoverFitnessWeeklyVolume(input, weekNumber, totalWeeks);
+  const isRecoveryWeek = weekNumber % 4 === 0 && weekNumber < totalWeeks;
+  const progressionType = getRecoverFitnessProgressionType(weekNumber, input.level);
+
+  const distributionMap: Record<number, number[]> = {
+    3: [0.32, 0.25, 0.43],
+    4: [0.27, 0.22, 0.18, 0.33],
+    5: [0.22, 0.18, 0.16, 0.18, 0.26],
+    6: [0.19, 0.16, 0.14, 0.16, 0.12, 0.23],
+  };
+
+  const distribution = distributionMap[days] || distributionMap[4];
+  const km = distribution.map((factor) =>
+    roundToHalf(clamp(weeklyVolume * factor, 3, 18))
+  );
+
+  const sessions: SessionSeed[] = [];
+
+  sessions.push(
+    makeSession({
+      day_of_week: days === 3 ? "Martes" : "Lunes",
+      session_type: "easy_run",
+      title: "Rodaje suave de regreso",
+      objective: "Recuperar base aeróbica sin acumular fatiga.",
+      distance_target: km[0],
+      duration_target: estimateMinutes(km[0], "easy_run"),
+      intensity_zone: "Z1-Z2",
+      warmup_text: "8-10 min trote muy suave + movilidad articular",
+      main_set_text: `Rodaje cómodo por ${km[0]} km. Debe sentirse fácil y conversacional.`,
+      cooldown_text: "5 min caminata o trote muy suave + movilidad",
+      estimated_load: Math.round(estimateMinutes(km[0], "easy_run") * 0.82),
+      status: "planned",
+    })
+  );
+
+  sessions.push(
+    makeSession({
+      day_of_week: days === 3 ? "Jueves" : "Martes",
+      session_type: "easy_run",
+      title: "Easy pace + técnica",
+      objective: "Mejorar sensación de carrera, movilidad y eficiencia sin intensidad alta.",
+      distance_target: km[1],
+      duration_target: estimateMinutes(km[1], "easy_run"),
+      intensity_zone: "Z2",
+      warmup_text: "10 min trote suave + movilidad de tobillo, cadera y pantorrilla",
+      main_set_text:
+        progressionType === "strides"
+          ? `Rodaje easy por ${km[1]} km + 4 progresiones de 15-20 segundos muy controladas.`
+          : `Rodaje easy por ${km[1]} km con cierre ligeramente progresivo, sin pasar de esfuerzo cómodo.`,
+      cooldown_text: "5 min trote suave + respiración",
+      estimated_load: Math.round(estimateMinutes(km[1], "easy_run") * 0.9),
+      status: "planned",
+    })
+  );
+
+  if (days >= 4) {
+    sessions.push(
+      makeSession({
+        day_of_week: "Miércoles",
+        session_type: "recovery",
+        title: isRecoveryWeek ? "Recuperación activa de descarga" : "Recuperación activa",
+        objective: "Sumar continuidad sin castigar piernas ni sistema cardiovascular.",
+        distance_target: km[2],
+        duration_target: estimateMinutes(km[2], "recovery"),
+        intensity_zone: "Z1-Z2",
+        warmup_text: "8 min trote muy suave",
+        main_set_text: `Trote regenerativo por ${km[2]} km. Si te sientes pesado, baja ritmo o camina tramos cortos.`,
+        cooldown_text: "Movilidad ligera de cadera, tobillo y pantorrilla",
+        estimated_load: Math.round(estimateMinutes(km[2], "recovery") * 0.72),
+        status: "planned",
+      })
+    );
+  }
+
+  if (days >= 5) {
+    const controlledText =
+      progressionType === "controlled_fartlek"
+        ? `Fartlek controlado dentro de ${km[3]} km: alterna 1 min vivo / 2 min suave, sin llegar al máximo.`
+        : `Rodaje progresivo suave por ${km[3]} km: inicia fácil y termina moderado, siempre con control.`;
+
+    sessions.push(
+      makeSession({
+        day_of_week: "Jueves",
+        session_type: progressionType === "controlled_fartlek" ? "fartlek" : "progression",
+        title:
+          progressionType === "controlled_fartlek"
+            ? "Fartlek controlado"
+            : "Progresivo suave",
+        objective: "Reactivar cambios de ritmo sin convertir la sesión en entrenamiento fuerte.",
+        distance_target: km[3],
+        duration_target: estimateMinutes(km[3], "tempo"),
+        intensity_zone: "Z2-Z3",
+        warmup_text: "10-12 min trote suave + movilidad + 3 progresiones cortas",
+        main_set_text: controlledText,
+        cooldown_text: "8 min trote suave",
+        estimated_load: Math.round(estimateMinutes(km[3], "tempo") * 1.0),
+        status: "planned",
+      })
+    );
+  }
+
+  if (days >= 6) {
+    sessions.push(
+      makeSession({
+        day_of_week: "Sábado",
+        session_type: "easy_run",
+        title: "Rodaje corto opcional",
+        objective: "Agregar volumen ligero solo si la recuperación va bien.",
+        distance_target: km[4],
+        duration_target: estimateMinutes(km[4], "easy_run"),
+        intensity_zone: "Z1-Z2",
+        warmup_text: "8 min trote suave",
+        main_set_text: `Rodaje muy cómodo por ${km[4]} km. Si hay fatiga, cambia por movilidad.`,
+        cooldown_text: "5 min caminata + movilidad",
+        estimated_load: Math.round(estimateMinutes(km[4], "easy_run") * 0.75),
+        status: "planned",
+      })
+    );
+  }
+
+  const longRunIndex = days === 3 ? 2 : days === 4 ? 3 : days === 5 ? 4 : 5;
+  const longRunKm = km[longRunIndex];
+
+  sessions.push(
+    makeSession({
+      day_of_week: "Domingo",
+      session_type: "long_run",
+      title: "Tirada cómoda para recuperar condición",
+      objective: "Reconstruir resistencia general sin forzar ritmo ni distancia.",
+      distance_target: longRunKm,
+      duration_target: estimateMinutes(longRunKm, "long_run"),
+      intensity_zone: "Z2",
+      warmup_text: "10-12 min trote muy suave",
+      main_set_text: `Tirada cómoda por ${longRunKm} km. Mantén esfuerzo conversacional; no busques ritmo objetivo.`,
+      cooldown_text: "Caminata ligera + movilidad y recuperación",
+      estimated_load: Math.round(estimateMinutes(longRunKm, "long_run") * 1.05),
+      status: "planned",
+    })
+  );
+
+  const selectedSessions = sessions.slice(0, days);
+
+  return selectedSessions.map((session, index) =>
+    applyWorkoutLibraryReference(
+      session,
+      input,
+      workoutLibrary,
+      index,
+      weekNumber,
+      days
+    )
+  );
+}
+
+
 function buildTempoMainSet(distanceKm: number, weekNumber: number, tempoKm: number) {
   if (weekNumber % 3 === 0) {
     return `Rodaje progresivo dentro de ${tempoKm} km: inicia cómodo y termina cerca de ritmo objetivo`;
@@ -550,8 +1014,13 @@ function buildTempoMainSet(distanceKm: number, weekNumber: number, tempoKm: numb
 function buildSessionsForWeek(
   input: AthleteProfileInput,
   weekNumber: number,
-  totalWeeks: number
+  totalWeeks: number,
+  workoutLibrary: WorkoutLibraryItem[] = []
 ): SessionSeed[] {
+  if (isRecoverFitnessGoal(input.goal)) {
+    return buildRecoverFitnessSessionsForWeek(input, weekNumber, totalWeeks, workoutLibrary);
+  }
+
   const distanceKm = normalizeDistance(input.distance);
   const days = clamp(Number(input.daysPerWeek || 4), 3, 6);
   const phase = getWeekPhase(weekNumber, totalWeeks);
@@ -704,17 +1173,34 @@ function buildSessionsForWeek(
     })
   );
 
-  return sessions.slice(0, days);
+  const selectedSessions = sessions.slice(0, days);
+
+  return selectedSessions.map((session, index) =>
+    applyWorkoutLibraryReference(
+      session,
+      input,
+      workoutLibrary,
+      index,
+      weekNumber,
+      days
+    )
+  );
 }
 
-function buildPlanStructure(input: AthleteProfileInput) {
+function buildPlanStructure(
+  input: AthleteProfileInput,
+  workoutLibrary: WorkoutLibraryItem[] = []
+) {
   const distanceKm = normalizeDistance(input.distance);
-  const totalWeeks = determinePlanWeeks(distanceKm, input.eventDate);
+  const isRecoveryConditionPlan = isRecoverFitnessGoal(input.goal);
+  const totalWeeks = isRecoveryConditionPlan
+    ? getRecoverFitnessWeeks()
+    : determinePlanWeeks(distanceKm, input.eventDate);
 
   return Array.from({ length: totalWeeks }, (_, index) => {
     const weekNumber = index + 1;
     const phase = getWeekPhase(weekNumber, totalWeeks);
-    const sessions = buildSessionsForWeek(input, weekNumber, totalWeeks);
+    const sessions = buildSessionsForWeek(input, weekNumber, totalWeeks, workoutLibrary);
     const totalTargetDistance = roundToHalf(
       sessions.reduce(
         (sum, session) => sum + Number(session.distance_target || 0),
@@ -725,19 +1211,29 @@ function buildPlanStructure(input: AthleteProfileInput) {
 
     return {
       week_number: weekNumber,
-      focus_label:
-        weekNumber === totalWeeks
-          ? "Semana de carrera / ajuste final"
+      focus_label: isRecoveryConditionPlan
+        ? weekNumber === totalWeeks
+          ? "Consolidación de condición"
           : recovery
-          ? `Descarga activa ${distanceLabel(distanceKm)}`
-          : `${phase} ${distanceLabel(distanceKm)}`,
+          ? "Descarga activa para recuperar condición"
+          : `${phase} - Recuperar condición`
+        : weekNumber === totalWeeks
+        ? "Semana de carrera / ajuste final"
+        : recovery
+        ? `Descarga activa ${distanceLabel(distanceKm)}`
+        : `${phase} ${distanceLabel(distanceKm)}`,
       total_target_distance: totalTargetDistance,
-      notes:
-        weekNumber === totalWeeks
-          ? "Reduce la carga, cuida descanso e hidratación. Prioriza llegar fresco."
+      notes: isRecoveryConditionPlan
+        ? weekNumber === totalWeeks
+          ? "Semana para consolidar condición: mantén esfuerzos cómodos y evalúa sensaciones antes de aumentar objetivo."
           : recovery
-          ? "Semana de descarga: el objetivo es recuperar, no acumular fatiga."
-          : "Carga progresiva: respeta zonas de esfuerzo y evita correr todos los días fuerte.",
+          ? "Semana de descarga: baja fatiga y conserva continuidad."
+          : "Plan de recuperación de condición: prioriza constancia, técnica y esfuerzo conversacional."
+        : weekNumber === totalWeeks
+        ? "Reduce la carga, cuida descanso e hidratación. Prioriza llegar fresco."
+        : recovery
+        ? "Semana de descarga: el objetivo es recuperar, no acumular fatiga."
+        : "Carga progresiva: respeta zonas de esfuerzo y evita correr todos los días fuerte.",
       sessions,
     };
   });
@@ -1299,7 +1795,8 @@ async function createTrainingPlanForUser(
 
   const planId = crypto.randomUUID();
   const createdAt = new Date().toISOString();
-  const weeks = buildPlanStructure(input);
+  const workoutLibrary = await fetchWorkoutLibrary(db);
+  const weeks = buildPlanStructure(input, workoutLibrary);
   const eventDate = input.eventDate?.trim() || null;
   const startDate = createdAt.slice(0, 10);
   const distanceKm = normalizeDistance(input.distance);
@@ -1318,8 +1815,16 @@ async function createTrainingPlanForUser(
         "active",
         startDate,
         eventDate,
-        `Plan estándar ${distanceLabel(distanceKm)} - ${input.goal.trim()} - ${weeks.length} semanas`,
-        `standard_${allowed.planCode || "unknown"}`,
+        isRecoverFitnessGoal(input.goal)
+          ? `Plan para recuperar condición - ${input.level.trim()} - ${input.daysPerWeek} días/semana - ${weeks.length} semanas`
+          : `Plan estándar ${distanceLabel(distanceKm)} - ${input.goal.trim()} - ${weeks.length} semanas`,
+        isRecoverFitnessGoal(input.goal)
+          ? workoutLibrary.length
+            ? `recover_fitness_library_${allowed.planCode || "unknown"}`
+            : `recover_fitness_${allowed.planCode || "unknown"}`
+          : workoutLibrary.length
+          ? `standard_library_${allowed.planCode || "unknown"}`
+          : `standard_${allowed.planCode || "unknown"}`,
         createdAt
       ),
   ];
@@ -3786,7 +4291,7 @@ async function generateAiPlanReview(
         {
           role: "system",
           content:
-            "Eres un coach de running prudente. Analiza el plan de entrenamiento, el progreso manual y el check-in. Devuelve recomendaciones prácticas en español. No prometas resultados médicos. No recomiendes aumentar carga si hay dolor, fatiga alta o poca adherencia.",
+            "Eres un coach de running prudente. Analiza el plan de entrenamiento, el progreso manual y el check-in. Devuelve recomendaciones prácticas en español. Si el objetivo es Recuperar condición, prioriza base aeróbica, constancia, esfuerzos conversacionales y progresión conservadora antes que ritmo o competencia. No prometas resultados médicos. No recomiendes aumentar carga si hay dolor, fatiga alta o poca adherencia.",
         },
         {
           role: "user",
