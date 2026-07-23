@@ -508,6 +508,24 @@ function getOrderedTrainingSessions(sessions?: Session[] | null) {
 }
 
 
+const TRAINING_DAY_OPTIONS = [
+
+  "Lunes",
+
+  "Martes",
+
+  "Miércoles",
+
+  "Jueves",
+
+  "Viernes",
+
+  "Sábado",
+
+  "Domingo",
+
+];
+
 function getAiRiskLabel(value: AiPlanReview["risk_level"]) {
   if (value === "high") return "alto";
   if (value === "medium") return "medio";
@@ -549,6 +567,7 @@ export default function App() {
     goal: "Completar una carrera",
     distance: "10K",
     daysPerWeek: 4,
+    preferredTrainingDays: ["Lunes", "Martes", "Jueves", "Domingo"],
     level: "Principiante",
     currentVolumeKm: 10,
     eventName: "",
@@ -568,6 +587,57 @@ export default function App() {
       }));
     }
   }, [form.goal]);
+
+  
+
+  // PREFERRED_TRAINING_DAYS_SYNC_FINAL
+
+  useEffect(() => {
+
+    setForm((previous) => {
+
+      const targetCount = Math.max(3, Math.min(6, Number(previous.daysPerWeek || 4)));
+
+      const currentDays = Array.isArray(previous.preferredTrainingDays)
+
+        ? previous.preferredTrainingDays.filter((day) => TRAINING_DAY_OPTIONS.includes(day))
+
+        : [];
+
+      let nextDays = currentDays.slice(0, targetCount);
+
+      for (const day of TRAINING_DAY_OPTIONS) {
+
+        if (nextDays.length >= targetCount) break;
+
+        if (!nextDays.includes(day)) nextDays.push(day);
+
+      }
+
+      if (
+
+        nextDays.length === currentDays.length &&
+
+        nextDays.every((day, index) => day === currentDays[index])
+
+      ) {
+
+        return previous;
+
+      }
+
+      return {
+
+        ...previous,
+
+        preferredTrainingDays: nextDays,
+
+      };
+
+    });
+
+  }, [form.daysPerWeek]);
+
 
   const [runnerProfileDraftTouched, setRunnerProfileDraftTouched] = useState(false);
 
@@ -1136,6 +1206,20 @@ async function fetchPlanSilently() {
 
   async function generatePlan() {
     if (!authUser) return;
+
+    if (
+
+      !Array.isArray(form.preferredTrainingDays) ||
+
+      form.preferredTrainingDays.length !== Number(form.daysPerWeek)
+
+    ) {
+
+      setResult(`Selecciona ${form.daysPerWeek} días de entrenamiento.`);
+
+      return;
+
+    }
 
     setPlanLoading(true);
     setResult("");
@@ -2100,6 +2184,106 @@ async function fetchPlanSilently() {
                         }))
                       }
                     />
+                  </Field>
+
+                  <Field label="Días de entrenamiento">
+
+                    <div className="training-day-picker">
+
+                      {TRAINING_DAY_OPTIONS.map((day) => {
+
+                        const selected = form.preferredTrainingDays.includes(day);
+
+                        const limitReached =
+
+                          form.preferredTrainingDays.length >= form.daysPerWeek;
+
+                        return (
+
+                          <button
+
+                            key={day}
+
+                            type="button"
+
+                            className={
+
+                              selected
+
+                                ? "training-day-pill active"
+
+                                : "training-day-pill"
+
+                            }
+
+                            onClick={() =>
+
+                              setForm((prev) => {
+
+                                const currentDays = Array.isArray(
+
+                                  prev.preferredTrainingDays
+
+                                )
+
+                                  ? prev.preferredTrainingDays
+
+                                  : [];
+
+                                if (currentDays.includes(day)) {
+
+                                  return {
+
+                                    ...prev,
+
+                                    preferredTrainingDays: currentDays.filter(
+
+                                      (item) => item !== day
+
+                                    ),
+
+                                  };
+
+                                }
+
+                                if (currentDays.length >= prev.daysPerWeek) {
+
+                                  return prev;
+
+                                }
+
+                                return {
+
+                                  ...prev,
+
+                                  preferredTrainingDays: [...currentDays, day],
+
+                                };
+
+                              })
+
+                            }
+
+                            disabled={!selected && limitReached}
+
+                          >
+
+                            {day.slice(0, 3)}
+
+                          </button>
+
+                        );
+
+                      })}
+
+                    </div>
+
+                    <small className="training-day-helper">
+
+                      Selecciona {form.daysPerWeek} días. El plan se asignará solo en esos días.
+
+                    </small>
+
                   </Field>
 
                   <Field label="Nivel">
@@ -4463,5 +4647,72 @@ button:disabled {
   opacity: 0.52;
   cursor: not-allowed;
 }
+
+
+
+/* Preferred training days */
+
+.training-day-picker {
+
+  display: flex;
+
+  flex-wrap: wrap;
+
+  gap: 8px;
+
+  margin-top: 4px;
+
+}
+
+.training-day-pill {
+
+  border: 1px solid rgba(255,255,255,0.12);
+
+  background: rgba(255,255,255,0.05);
+
+  color: rgba(255,255,255,0.78);
+
+  border-radius: 999px;
+
+  padding: 9px 11px;
+
+  font-size: 12px;
+
+  font-weight: 900;
+
+  cursor: pointer;
+
+}
+
+.training-day-pill.active {
+
+  border-color: rgba(255,122,0,0.55);
+
+  background: rgba(255,122,0,0.16);
+
+  color: #fff;
+
+}
+
+.training-day-pill:disabled {
+
+  opacity: 0.35;
+
+  cursor: not-allowed;
+
+}
+
+.training-day-helper {
+
+  display: block;
+
+  margin-top: 8px;
+
+  color: rgba(255,255,255,0.55);
+
+  font-size: 12px;
+
+}
+
 
 `;

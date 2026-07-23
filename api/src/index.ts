@@ -731,6 +731,117 @@ function buildQualityMainSet(distanceKm: number, weekNumber: number, qualityKm: 
 }
 
 
+
+
+const TRAINING_DAY_ORDER = [
+
+  "Lunes",
+
+  "Martes",
+
+  "Miércoles",
+
+  "Jueves",
+
+  "Viernes",
+
+  "Sábado",
+
+  "Domingo",
+
+];
+
+function normalizePreferredTrainingDays(value: unknown, daysPerWeek: number) {
+
+  const target = Math.max(3, Math.min(6, Number(daysPerWeek || 4)));
+
+  const rawDays = Array.isArray(value)
+
+    ? value
+
+    : typeof value === "string"
+
+    ? value.split(",")
+
+    : [];
+
+  const selected = rawDays
+
+    .map((day) => String(day || "").trim())
+
+    .filter((day) => TRAINING_DAY_ORDER.includes(day))
+
+    .filter((day, index, arr) => arr.indexOf(day) === index)
+
+    .slice(0, target);
+
+  for (const day of TRAINING_DAY_ORDER) {
+
+    if (selected.length >= target) break;
+
+    if (!selected.includes(day)) selected.push(day);
+
+  }
+
+  return selected;
+
+}
+
+function applyPreferredTrainingDaysToSessions<T extends { day_of_week?: string }>(
+
+  input: { preferredTrainingDays?: unknown; daysPerWeek?: number },
+
+  sessions: T[]
+
+) {
+
+  const preferredDays = normalizePreferredTrainingDays(
+
+    input.preferredTrainingDays,
+
+    Number(input.daysPerWeek || sessions.length || 4)
+
+  );
+
+  return sessions.map((session, index) => ({
+
+    ...session,
+
+    day_of_week: preferredDays[index % preferredDays.length] || session.day_of_week,
+
+  }));
+
+}
+
+function applyPreferredTrainingDaysToPlanStructure(input: any, planStructure: any) {
+
+  if (!planStructure?.weeks || !Array.isArray(planStructure.weeks)) {
+
+    return planStructure;
+
+  }
+
+  return {
+
+    ...planStructure,
+
+    weeks: planStructure.weeks.map((week: any) => ({
+
+      ...week,
+
+      sessions: Array.isArray(week.sessions)
+
+        ? applyPreferredTrainingDaysToSessions(input, week.sessions)
+
+        : week.sessions,
+
+    })),
+
+  };
+
+}
+
+
 function normalizeGoalText(goal: string) {
   return String(goal || "")
     .normalize("NFD")
