@@ -671,7 +671,7 @@ function applyWorkoutLibraryReference(
 
   const block = String(item.main_set_template || item.library_block || "").trim();
   const distanceText = session.distance_target
-    ? ` Ajuste para este plan: ${session.distance_target} km objetivo.`
+    ? ` Distancia asignada: ${session.distance_target} km objetivo.`
     : "";
 
   const shouldKeepLongRunText =
@@ -685,7 +685,7 @@ function applyWorkoutLibraryReference(
     intensity_zone: item.intensity_zone || session.intensity_zone,
     main_set_text: shouldKeepLongRunText
       ? session.main_set_text
-      : `Referencia biblioteca Peak Pulse: ${block}.${distanceText}`,
+      : `${block}.${distanceText}`,
   };
 }
 
