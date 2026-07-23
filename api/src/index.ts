@@ -352,7 +352,7 @@ function validateProfile(body: AthleteProfileInput) {
   if (!body.email?.trim()) throw new Error("El correo es obligatorio");
   if (!body.email.includes("@")) throw new Error("El correo no es válido");
   if (!body.goal?.trim()) throw new Error("El objetivo es obligatorio");
-  if (!body.distance?.trim()) throw new Error("La distancia es obligatoria");
+  if ((!isRecoverFitnessGoal(body.goal) && !body.distance)?.trim()) throw new Error("La distancia es obligatoria");
   if (
     !Number.isFinite(body.daysPerWeek) ||
     body.daysPerWeek < 1 ||
