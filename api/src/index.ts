@@ -1191,8 +1191,10 @@ function buildPlanStructure(
   input: AthleteProfileInput,
   workoutLibrary: WorkoutLibraryItem[] = []
 ) {
-  const distanceKm = normalizeDistance(input.distance);
   const isRecoveryConditionPlan = isRecoverFitnessGoal(input.goal);
+  const distanceKm = isRecoveryConditionPlan
+    ? 0
+    : normalizeDistance(input.distance);
   const totalWeeks = isRecoveryConditionPlan
     ? getRecoverFitnessWeeks()
     : determinePlanWeeks(distanceKm, input.eventDate);

@@ -554,6 +554,21 @@ export default function App() {
     eventName: "",
     eventDate: "",
   });
+
+  // RECOVER_FITNESS_UX_RESET_V1
+  useEffect(() => {
+    if (
+      form.goal === "Recuperar condición" &&
+      (form.distance || form.eventDate)
+    ) {
+      setForm((previous) => ({
+        ...previous,
+        distance: "",
+        eventDate: "",
+      }));
+    }
+  }, [form.goal]);
+
   const [runnerProfileDraftTouched, setRunnerProfileDraftTouched] = useState(false);
 
   const [trainingPlan, setTrainingPlan] = useState<TrainingPlan | null>(null);
@@ -2023,20 +2038,51 @@ async function fetchPlanSilently() {
                   </Field>
 
                   <Field label="Distancia">
+
                     <select
-                      value={form.distance}
-                      onChange={(e) => {
-                        setRunnerProfileDraftTouched(true);
+
+                      value={form.distance || ""}
+
+                      disabled={form.goal === "Recuperar condición"}
+
+                      onChange={(e) =>
+
                         setForm((prev) => ({
+
                           ...prev,
+
                           distance: e.target.value,
-                        }));
-                      }}
+
+                        }))
+
+                      }
+
                     >
-                      {allowedDistances.map((distance) => (
-                        <option key={distance}>{distance}</option>
-                      ))}
+
+                      <option value="">
+
+                        {form.goal === "Recuperar condición"
+
+                          ? "No aplica para este objetivo"
+
+                          : "Selecciona distancia"}
+
+                      </option>
+
+                      {form.goal !== "Recuperar condición" &&
+
+                        allowedDistances.map((distance) => (
+
+                          <option key={distance} value={distance}>
+
+                            {distance}
+
+                          </option>
+
+                        ))}
+
                     </select>
+
                   </Field>
                 </div>
 
@@ -2088,6 +2134,7 @@ async function fetchPlanSilently() {
                   <Field label="Fecha del evento">
                     <input
                       type="date"
+                      disabled={form.goal === "Recuperar condición"}
                       value={form.eventDate}
                       onChange={(e) =>
                         setForm((prev) => ({
