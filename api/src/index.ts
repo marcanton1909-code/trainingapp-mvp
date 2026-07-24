@@ -24,6 +24,7 @@ type AthleteProfileInput = {
   goal: string;
   distance: string;
   daysPerWeek: number;
+  preferredTrainingDays?: unknown;
   level: string;
   currentVolumeKm: number;
   eventName?: string;
@@ -711,6 +712,332 @@ async function fetchWorkoutLibrary(db: D1Database) {
 
 function makeSession(seed: SessionSeed): SessionSeed {
   return seed;
+}
+
+
+type PaceEngineContext = {
+  baselineSecondsPerKm: number;
+  recentMedianSecondsPerKm: number | null;
+  completedSessions: number;
+  missedSessions: number;
+  completionRate: number;
+  fatigueScore: number;
+  sorenessScore: number;
+  sleepQualityScore: number;
+  aiDeltaSeconds: number;
+  aiReason: string;
+  source: "history_ai" | "history_rules" | "level_ai" | "level_rules";
+};
+
+type PaceAiAdjustment = {
+  delta_seconds: number;
+  reason: string;
+};
+
+function clampPace(value: number, min = 210, max = 720) {
+  return Math.round(Math.max(min, Math.min(max, value)));
+}
+
+function median(values: number[]) {
+  if (!values.length) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2
+    ? sorted[middle]
+    : Math.round((sorted[middle - 1] + sorted[middle]) / 2);
+}
+
+function formatPace(secondsPerKm: number) {
+  const safe = clampPace(secondsPerKm);
+  const minutes = Math.floor(safe / 60);
+  const seconds = String(safe % 60).padStart(2, "0");
+  return `${minutes}:${seconds}`;
+}
+
+function getLevelBaselinePace(level: string, currentVolumeKm: number) {
+  const normalized = normalizeGoalText(level);
+  let baseline = normalized.includes("avanz") || normalized.includes("expert")
+    ? 320
+    : normalized.includes("inter") || normalized.includes("medio")
+    ? 365
+    : 420;
+
+  if (currentVolumeKm >= 45) baseline -= 15;
+  else if (currentVolumeKm >= 30) baseline -= 8;
+  else if (currentVolumeKm > 0 && currentVolumeKm < 12) baseline += 15;
+
+  return clampPace(baseline);
+}
+
+async function fetchPaceEngineContext(
+  db: D1Database,
+  userId: string,
+  input: AthleteProfileInput
+): Promise<Omit<PaceEngineContext, "aiDeltaSeconds" | "aiReason" | "source">> {
+  const progress = await db
+    .prepare(
+      `select is_completed, actual_pace_seconds_per_km, source, updated_at
+       from training_session_progress
+       where user_id = ?1
+       order by updated_at desc
+       limit 20`
+    )
+    .bind(userId)
+    .all<any>();
+
+  const rows = progress.results || [];
+  const validPaces = rows
+    .filter((row: any) => Number(row.is_completed) === 1)
+    .map((row: any) => Number(row.actual_pace_seconds_per_km || 0))
+    .filter((pace: number) => pace >= 210 && pace <= 720)
+    .slice(0, 10);
+
+  const completedSessions = rows.filter(
+    (row: any) => Number(row.is_completed) === 1
+  ).length;
+  const missedSessions = rows.filter(
+    (row: any) => Number(row.is_completed) !== 1 &&
+      String(row.source || "").includes("missed")
+  ).length;
+  const decidedSessions = completedSessions + missedSessions;
+  const completionRate = decidedSessions
+    ? completedSessions / decidedSessions
+    : 0;
+
+  let latestCheckin: any = null;
+  try {
+    latestCheckin = await db
+      .prepare(
+        `select fatigue_score, soreness_score, sleep_quality_score, created_at
+         from weekly_checkins
+         where user_id = ?1
+         order by created_at desc
+         limit 1`
+      )
+      .bind(userId)
+      .first<any>();
+  } catch {
+    latestCheckin = null;
+  }
+
+  const recentMedianSecondsPerKm = median(validPaces);
+  const levelBaseline = getLevelBaselinePace(
+    input.level,
+    Number(input.currentVolumeKm || 0)
+  );
+
+  // El historial manda, pero se limita para evitar que una sesión aislada
+  // convierta el ritmo de competencia en ritmo fácil.
+  const baselineSecondsPerKm = recentMedianSecondsPerKm
+    ? clampPace(
+        recentMedianSecondsPerKm * 0.72 + levelBaseline * 0.28,
+        levelBaseline - 55,
+        levelBaseline + 65
+      )
+    : levelBaseline;
+
+  return {
+    baselineSecondsPerKm,
+    recentMedianSecondsPerKm,
+    completedSessions,
+    missedSessions,
+    completionRate,
+    fatigueScore: Number(latestCheckin?.fatigue_score || 0),
+    sorenessScore: Number(latestCheckin?.soreness_score || 0),
+    sleepQualityScore: Number(latestCheckin?.sleep_quality_score || 0),
+  };
+}
+
+async function getAiPaceAdjustment(
+  env: Pick<Bindings, "OPENAI_API_KEY" | "OPENAI_MODEL" | "AI_ENABLED"> | undefined,
+  input: AthleteProfileInput,
+  context: Omit<PaceEngineContext, "aiDeltaSeconds" | "aiReason" | "source">
+): Promise<PaceAiAdjustment> {
+  const aiEnabled = String(env?.AI_ENABLED || "false").toLowerCase() === "true";
+  if (!aiEnabled || !env?.OPENAI_API_KEY) {
+    return { delta_seconds: 0, reason: "Ajuste por reglas internas" };
+  }
+
+  try {
+    const response = await fetch("https://api.openai.com/v1/responses", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${env.OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: env.OPENAI_MODEL || "gpt-4.1-mini",
+        input: [
+          {
+            role: "system",
+            content:
+              "Actúa como coach de running prudente. Decide solamente un ajuste de ritmo en segundos por km entre -20 y 20. Un número positivo hace el ritmo más lento y uno negativo más rápido. Si hay fatiga alta, molestias, mal sueño, baja adherencia o el objetivo es recuperar condición, no aceleres. No diagnostiques ni prescribas tratamiento.",
+          },
+          {
+            role: "user",
+            content: JSON.stringify({
+              goal: input.goal,
+              level: input.level,
+              daysPerWeek: input.daysPerWeek,
+              currentVolumeKm: input.currentVolumeKm,
+              ...context,
+            }),
+          },
+        ],
+        text: {
+          format: {
+            type: "json_schema",
+            name: "pace_adjustment",
+            strict: true,
+            schema: {
+              type: "object",
+              additionalProperties: false,
+              required: ["delta_seconds", "reason"],
+              properties: {
+                delta_seconds: { type: "integer", minimum: -20, maximum: 20 },
+                reason: { type: "string", maxLength: 180 },
+              },
+            },
+          },
+        },
+      }),
+    });
+
+    const data = (await response.json()) as any;
+    if (!response.ok) throw new Error(data?.error?.message || "AI pace error");
+    const text = extractOpenAiOutputText(data);
+    const parsed = JSON.parse(text) as PaceAiAdjustment;
+    return {
+      delta_seconds: Math.max(-20, Math.min(20, Number(parsed.delta_seconds || 0))),
+      reason: String(parsed.reason || "Ajuste inteligente conservador"),
+    };
+  } catch (error) {
+    console.warn("AI pace adjustment unavailable; using rules", error);
+    return { delta_seconds: 0, reason: "Ajuste por reglas internas" };
+  }
+}
+
+function getSessionPacePrescription(
+  session: SessionSeed,
+  weekNumber: number,
+  totalWeeks: number,
+  context: PaceEngineContext
+) {
+  const type = normalizeGoalText(session.session_type);
+  const recoveryWeek = weekNumber % 4 === 0 && weekNumber < totalWeeks;
+  const phaseProgress = totalWeeks > 1 ? (weekNumber - 1) / (totalWeeks - 1) : 0;
+  const progression = Math.round(Math.min(14, phaseProgress * 14));
+
+  let offset = 20;
+  let width = 20;
+  let rpe = "3/10";
+  let difficulty = "Fácil";
+  let feeling = "Cómodo y conversacional; debes poder hablar en frases completas.";
+
+  if (type.includes("recover") || type.includes("regener")) {
+    offset = 45;
+    width = 25;
+    rpe = "2/10";
+    difficulty = "Muy fácil";
+    feeling = "Muy relajado; termina con sensación de poder continuar.";
+  } else if (type.includes("long")) {
+    offset = 28;
+    width = 22;
+    rpe = "3-4/10";
+    difficulty = "Fácil";
+    feeling = "Constante y controlado; evita perseguir velocidad al final.";
+  } else if (type.includes("tempo") || type.includes("threshold")) {
+    offset = -22;
+    width = 14;
+    rpe = "6-7/10";
+    difficulty = "Exigente controlado";
+    feeling = "Fuerte pero sostenible; sin llegar a esfuerzo máximo.";
+  } else if (type.includes("interval")) {
+    offset = -38;
+    width = 15;
+    rpe = "7-8/10";
+    difficulty = "Exigente";
+    feeling = "Rápido con técnica estable; recupera lo suficiente para repetir bien.";
+  } else if (type.includes("fartlek")) {
+    offset = -28;
+    width = 18;
+    rpe = "6/10 en tramos vivos";
+    difficulty = "Moderada";
+    feeling = "Los cambios son vivos, no máximos; las recuperaciones deben ser suaves.";
+  } else if (type.includes("progress")) {
+    offset = 8;
+    width = 24;
+    rpe = "3-6/10";
+    difficulty = "Moderada";
+    feeling = "Empieza cómodo y acelera gradualmente sin perder control.";
+  }
+
+  let safetyDelta = 0;
+  if (context.fatigueScore >= 4 || context.sorenessScore >= 4) safetyDelta += 20;
+  if (context.sleepQualityScore > 0 && context.sleepQualityScore <= 2) safetyDelta += 10;
+  if (context.missedSessions >= 2 || (context.completedSessions >= 3 && context.completionRate < 0.6)) {
+    safetyDelta += 10;
+  }
+  if (recoveryWeek) safetyDelta += 10;
+
+  const center = clampPace(
+    context.baselineSecondsPerKm + offset - progression + safetyDelta + context.aiDeltaSeconds
+  );
+  const minSeconds = clampPace(center - Math.floor(width / 2));
+  const maxSeconds = clampPace(center + Math.ceil(width / 2));
+
+  return {
+    minSeconds,
+    maxSeconds,
+    rpe,
+    difficulty,
+    feeling,
+  };
+}
+
+function stripInternalWorkoutReferences(text: string) {
+  return String(text || "")
+    .replace(/Referencia\s+(?:de\s+la\s+)?biblioteca\s+Peak\s+Pulse:\s*/gi, "")
+    .replace(/Biblioteca\s+Peak\s+Pulse:\s*/gi, "")
+    .replace(/Referencia\s+de\s+biblioteca:\s*/gi, "")
+    .replace(/Ajuste\s+para\s+este\s+plan:\s*/gi, "Distancia asignada: ")
+    .trim();
+}
+
+function enrichPlanWithPaces(
+  weeks: any[],
+  context: PaceEngineContext
+) {
+  const totalWeeks = weeks.length;
+  return weeks.map((week: any) => ({
+    ...week,
+    sessions: (week.sessions || []).map((session: SessionSeed) => {
+      const prescription = getSessionPacePrescription(
+        session,
+        Number(week.week_number || 1),
+        totalWeeks,
+        context
+      );
+      const cleanMainSet = stripInternalWorkoutReferences(session.main_set_text);
+      const paceText = `Ritmo recomendado: ${formatPace(prescription.minSeconds)}–${formatPace(prescription.maxSeconds)} min/km.`;
+      const effortText = `Esfuerzo: RPE ${prescription.rpe} · Dificultad: ${prescription.difficulty}.`;
+      const feelingText = `Sensación esperada: ${prescription.feeling}`;
+
+      return {
+        ...session,
+        main_set_text: [cleanMainSet, paceText, effortText, feelingText]
+          .filter(Boolean)
+          .join(" "),
+      };
+    }),
+  }));
+}
+
+function applyPreferredDaysToWeeks(input: AthleteProfileInput, weeks: any[]) {
+  return weeks.map((week: any) => ({
+    ...week,
+    sessions: applyPreferredTrainingDaysToSessions(input, week.sessions || []),
+  }));
 }
 
 function buildQualityMainSet(distanceKm: number, weekNumber: number, qualityKm: number, goal: string) {
@@ -1895,7 +2222,8 @@ async function registerPlanChangeUsage(db: D1Database, userId: string) {
 async function createTrainingPlanForUser(
   db: D1Database,
   userId: string,
-  input: AthleteProfileInput
+  input: AthleteProfileInput,
+  aiEnv?: Pick<Bindings, "OPENAI_API_KEY" | "OPENAI_MODEL" | "AI_ENABLED">
 ) {
   const allowed = await validateDistanceForMembership(db, userId, input.distance);
   if (!allowed.ok) {
@@ -1911,7 +2239,23 @@ async function createTrainingPlanForUser(
   const planId = crypto.randomUUID();
   const createdAt = new Date().toISOString();
   const workoutLibrary = await fetchWorkoutLibrary(db);
-  const weeks = buildPlanStructure(input, workoutLibrary);
+  const paceBaseContext = await fetchPaceEngineContext(db, userId, input);
+  const aiPaceAdjustment = await getAiPaceAdjustment(aiEnv, input, paceBaseContext);
+  const paceContext: PaceEngineContext = {
+    ...paceBaseContext,
+    aiDeltaSeconds: aiPaceAdjustment.delta_seconds,
+    aiReason: aiPaceAdjustment.reason,
+    source: paceBaseContext.recentMedianSecondsPerKm
+      ? aiPaceAdjustment.reason === "Ajuste por reglas internas"
+        ? "history_rules"
+        : "history_ai"
+      : aiPaceAdjustment.reason === "Ajuste por reglas internas"
+      ? "level_rules"
+      : "level_ai",
+  };
+  let weeks = buildPlanStructure(input, workoutLibrary);
+  weeks = applyPreferredDaysToWeeks(input, weeks);
+  weeks = enrichPlanWithPaces(weeks, paceContext);
   const eventDate = input.eventDate?.trim() || null;
   const startDate = createdAt.slice(0, 10);
   const distanceKm = normalizeDistance(input.distance);
@@ -2012,7 +2356,11 @@ async function createTrainingPlanForUser(
   };
 }
 
-async function ensurePlanForUser(db: D1Database, userId: string) {
+async function ensurePlanForUser(
+  db: D1Database,
+  userId: string,
+  aiEnv?: Pick<Bindings, "OPENAI_API_KEY" | "OPENAI_MODEL" | "AI_ENABLED">
+) {
   const existingPlan = await db
     .prepare(
       `select id
@@ -2104,7 +2452,7 @@ async function ensurePlanForUser(db: D1Database, userId: string) {
     notes: profile.notes || "",
   };
 
-  const createdPlan = await createTrainingPlanForUser(db, userId, input);
+  const createdPlan = await createTrainingPlanForUser(db, userId, input, aiEnv);
 
   return {
     created: true,
@@ -3515,7 +3863,8 @@ app.post("/api/plan/generate", async (c) => {
     const createdPlan = await createTrainingPlanForUser(
       c.env.DB,
       body.userId,
-      body
+      body,
+      c.env
     );
 
     return c.json({
@@ -3582,7 +3931,7 @@ app.get("/api/plan/:userId", async (c) => {
         );
       }
 
-      autoPlan = await ensurePlanForUser(c.env.DB, userId);
+      autoPlan = await ensurePlanForUser(c.env.DB, userId, c.env);
 
       if (autoPlan.created || autoPlan.reason === "already_exists") {
         plan = await c.env.DB
@@ -4644,7 +4993,7 @@ app.post("/api/paypal/link-subscription", async (c) => {
 
     if (membershipStatus === "active") {
       try {
-        autoPlan = await ensurePlanForUser(c.env.DB, userId);
+        autoPlan = await ensurePlanForUser(c.env.DB, userId, c.env);
       } catch (error) {
         autoPlan = {
           created: false,
@@ -4860,7 +5209,7 @@ app.post("/api/paypal/webhook", async (c) => {
 
       if (membershipStatus === "active") {
         try {
-          autoPlan = await ensurePlanForUser(c.env.DB, linkedUserId);
+          autoPlan = await ensurePlanForUser(c.env.DB, linkedUserId, c.env);
         } catch (error) {
           autoPlan = {
             created: false,
@@ -5061,7 +5410,7 @@ app.post("/api/mercadopago/webhook", async (c) => {
 
       if (membershipStatus === "active") {
         try {
-          autoPlan = await ensurePlanForUser(c.env.DB, linkedUserId);
+          autoPlan = await ensurePlanForUser(c.env.DB, linkedUserId, c.env);
         } catch (error) {
           autoPlan = {
             created: false,
