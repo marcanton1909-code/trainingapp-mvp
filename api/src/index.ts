@@ -3,6 +3,9 @@ import type { Context } from "hono";
 
 type Bindings = {
   DB: D1Database;
+  AI: {
+    run(model: string, inputs: any): Promise<any>;
+  };
   MP_WEBHOOK_SECRET: string;
   MP_ACCESS_TOKEN: string;
   CONEKTA_PRIVATE_KEY: string;
@@ -16,6 +19,7 @@ type Bindings = {
   OPENAI_API_KEY?: string;
   OPENAI_MODEL?: string;
   AI_ENABLED?: string;
+  CLOUDFLARE_AI_MODEL?: string;
 };
 
 type AthleteProfileInput = {
@@ -4698,10 +4702,14 @@ async function generateAiPlanReview(
   model: string;
   usedFallback: boolean;
 }> {
-  const model = c.env.OPENAI_MODEL || "gpt-4.1-mini";
-  const aiEnabled = String(c.env.AI_ENABLED || "false").toLowerCase() === "true";
+  const model =
+    c.env.CLOUDFLARE_AI_MODEL ||
+    "@cf/meta/llama-3.1-8b-instruct-fast";
 
-  if (!aiEnabled || !c.env.OPENAI_API_KEY) {
+  const aiEnabled =
+    String(c.env.AI_ENABLED ?? "true").toLowerCase() !== "false";
+
+  if (!aiEnabled || !c.env.AI) {
     return {
       review: fallbackPlanReview(payload),
       model: "fallback-rules",
@@ -4724,7 +4732,10 @@ async function generateAiPlanReview(
     properties: {
       summary: { type: "string" },
       weekly_recommendation: { type: "string" },
-      risk_level: { type: "string", enum: ["low", "medium", "high"] },
+      risk_level: {
+        type: "string",
+        enum: ["low", "medium", "high"],
+      },
       load_adjustment: {
         type: "string",
         enum: ["maintain", "reduce", "increase"],
@@ -4743,52 +4754,55 @@ async function generateAiPlanReview(
     },
   };
 
-  const response = await fetch("https://api.openai.com/v1/responses", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${c.env.OPENAI_API_KEY}`,
-    },
-    body: JSON.stringify({
+  try {
+    const result = (await c.env.AI.run(
       model,
-      input: [
-        {
-          role: "system",
-          content:
-            "Eres un coach de running prudente. Analiza el plan de entrenamiento, el progreso manual y el check-in. Devuelve recomendaciones prácticas en español. Si el objetivo es Recuperar condición, prioriza base aeróbica, constancia, esfuerzos conversacionales y progresión conservadora antes que ritmo o competencia. No prometas resultados médicos. No recomiendes aumentar carga si hay dolor, fatiga alta o poca adherencia.",
-        },
-        {
-          role: "user",
-          content: JSON.stringify(payload),
-        },
-      ],
-      text: {
-        format: {
+      {
+        messages: [
+          {
+            role: "system",
+            content:
+              "Eres un coach de running prudente. Analiza exclusivamente los datos proporcionados del plan, progreso, ritmos y check-in. Responde en español claro y no inventes entrenamientos ni resultados. Si faltan datos, indícalo. Para Recuperar condición, prioriza base aeróbica, constancia, esfuerzo conversacional y progresión conservadora. No aumentes carga cuando exista dolor, fatiga alta, sueño deficiente o baja adherencia. No diagnostiques ni sustituyas atención médica. Devuelve únicamente el objeto solicitado por el esquema JSON.",
+          },
+          {
+            role: "user",
+            content: JSON.stringify(payload),
+          },
+        ],
+        response_format: {
           type: "json_schema",
-          name: "training_plan_review",
-          schema,
-          strict: true,
+          json_schema: schema,
         },
-      },
-    }),
-  });
+        max_tokens: 700,
+        temperature: 0.25,
+        repetition_penalty: 1.08,
+      } as any
+    )) as any;
 
-  const data = (await response.json()) as any;
+    const responseValue = result?.response ?? result;
 
-  if (!response.ok) {
-    throw new Error(
-      data?.error?.message || "No fue posible generar el análisis con IA"
+    const review =
+      typeof responseValue === "string"
+        ? parseAiJsonFromText(responseValue)
+        : parseAiJsonFromText(JSON.stringify(responseValue));
+
+    return {
+      review,
+      model,
+      usedFallback: false,
+    };
+  } catch (error) {
+    console.warn(
+      "Cloudflare Workers AI no estuvo disponible; se usarán reglas internas.",
+      error
     );
+
+    return {
+      review: fallbackPlanReview(payload),
+      model: "fallback-rules",
+      usedFallback: true,
+    };
   }
-
-  const outputText = extractOpenAiOutputText(data);
-  const review = parseAiJsonFromText(outputText);
-
-  return {
-    review,
-    model,
-    usedFallback: false,
-  };
 }
 
 app.post("/api/checkins/weekly", async (c) => {

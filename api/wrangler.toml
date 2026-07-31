@@ -6,3 +6,6 @@ compatibility_date = "2025-04-22"
 binding = "DB"
 database_name = "training-db"
 database_id = "36fd2a36-aa7e-4784-a1c5-37e3a5f47497"
+
+[ai]
+binding = "AI"
