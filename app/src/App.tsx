@@ -308,24 +308,215 @@ function secondsToPaceInput(seconds?: number | null) {
 }
 
 
+
+// TRAINING_WEEK_CALENDAR_ROBUST_V4
+const TRAINING_CALENDAR_DAY_INDEX: Record<string, number> = {
+  lunes: 0,
+  martes: 1,
+  miercoles: 2,
+  jueves: 3,
+  viernes: 4,
+  sabado: 5,
+  domingo: 6,
+};
+
+function normalizeTrainingCalendarDay(value?: string | null) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+}
+
+function getMonterreyCalendarParts(date = new Date()) {
+  const formatter = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Monterrey",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  });
+
+  const values: Record<string, string> = {};
+
+  for (const part of formatter.formatToParts(date)) {
+    if (part.type !== "literal") {
+      values[part.type] = part.value;
+    }
+  }
+
+  return {
+    year: Number(values.year),
+    month: Number(values.month),
+    day: Number(values.day),
+    hour: Number(values.hour),
+    minute: Number(values.minute),
+    second: Number(values.second),
+  };
+}
+
+function trainingCalendarPartsToDate(parts: {
+  year: number;
+  month: number;
+  day: number;
+  hour?: number;
+  minute?: number;
+  second?: number;
+}) {
+  return new Date(
+    Date.UTC(
+      parts.year,
+      parts.month - 1,
+      parts.day,
+      parts.hour || 0,
+      parts.minute || 0,
+      parts.second || 0
+    )
+  );
+}
+
+function getTrainingMonday(date: Date) {
+  const result = new Date(date);
+  const weekDay = result.getUTCDay();
+  const daysFromMonday = weekDay === 0 ? 6 : weekDay - 1;
+
+  result.setUTCDate(result.getUTCDate() - daysFromMonday);
+  result.setUTCHours(0, 0, 0, 0);
+
+  return result;
+}
+
+function getOfficialTrainingMonday(now = new Date()) {
+  const parts = getMonterreyCalendarParts(now);
+  const localDate = trainingCalendarPartsToDate(parts);
+
+  // El domingo a las 22:00 se libera la semana del lunes siguiente.
+  if (localDate.getUTCDay() === 0 && parts.hour >= 22) {
+    localDate.setUTCDate(localDate.getUTCDate() + 1);
+  }
+
+  return getTrainingMonday(localDate);
+}
+
+function getTrainingPlanStartMonday(plan: TrainingPlan | null) {
+  const rawDate = plan?.start_date || plan?.created_at;
+
+  if (!rawDate) {
+    return getOfficialTrainingMonday();
+  }
+
+  // Trata YYYY-MM-DD como fecha de calendario, sin desfase horario.
+  if (/^\d{4}-\d{2}-\d{2}$/.test(rawDate)) {
+    const [year, month, day] = rawDate.split("-").map(Number);
+
+    return getTrainingMonday(
+      new Date(Date.UTC(year, month - 1, day))
+    );
+  }
+
+  const parsedDate = new Date(rawDate);
+
+  if (Number.isNaN(parsedDate.getTime())) {
+    return getOfficialTrainingMonday();
+  }
+
+  const parts = getMonterreyCalendarParts(parsedDate);
+  const localDate = trainingCalendarPartsToDate(parts);
+
+  if (
+    !plan?.start_date &&
+    localDate.getUTCDay() === 0 &&
+    parts.hour >= 22
+  ) {
+    localDate.setUTCDate(localDate.getUTCDate() + 1);
+  }
+
+  return getTrainingMonday(localDate);
+}
+
+function getTrainingWeekStartDate(
+  plan: TrainingPlan | null,
+  weekNumber: number
+) {
+  const result = getTrainingPlanStartMonday(plan);
+
+  result.setUTCDate(
+    result.getUTCDate() +
+      Math.max(0, Number(weekNumber || 1) - 1) * 7
+  );
+
+  return result;
+}
+
+function formatTrainingCalendarDate(
+  date: Date,
+  includeWeekday = false
+) {
+  return new Intl.DateTimeFormat("es-MX", {
+    timeZone: "UTC",
+    ...(includeWeekday ? { weekday: "long" as const } : {}),
+    day: "numeric",
+    month: "short",
+  })
+    .format(date)
+    .replace(/\./g, "");
+}
+
+function getTrainingWeekDateRange(
+  plan: TrainingPlan | null,
+  weekNumber: number
+) {
+  const start = getTrainingWeekStartDate(plan, weekNumber);
+  const end = new Date(start);
+
+  end.setUTCDate(end.getUTCDate() + 6);
+
+  return `${formatTrainingCalendarDate(start)} – ${formatTrainingCalendarDate(end)}`;
+}
+
+function getTrainingSessionCalendarDate(
+  plan: TrainingPlan | null,
+  weekNumber: number,
+  dayOfWeek?: string | null
+) {
+  const date = getTrainingWeekStartDate(plan, weekNumber);
+
+  const dayIndex =
+    TRAINING_CALENDAR_DAY_INDEX[
+      normalizeTrainingCalendarDay(dayOfWeek)
+    ] ?? 0;
+
+  date.setUTCDate(date.getUTCDate() + dayIndex);
+
+  return formatTrainingCalendarDate(date, true);
+}
+
+
 function getCurrentPlanWeekNumber(plan: TrainingPlan | null, weeks: Week[]) {
-  if (!weeks.length) return 1;
+  if (!weeks.length) return null;
 
-  const maxWeek = Math.max(...weeks.map((week) => Number(week.week_number || 1)));
-  const startDateValue = plan?.start_date || plan?.created_at;
+  const maximumWeek = Math.max(
+    ...weeks.map((week) => Number(week.week_number || 1))
+  );
 
-  if (!startDateValue) return 1;
+  const planStartMonday = getTrainingPlanStartMonday(plan);
+  const officialMonday = getOfficialTrainingMonday(new Date());
 
-  const start = new Date(startDateValue);
-  const now = new Date();
+  const elapsedMilliseconds =
+    officialMonday.getTime() - planStartMonday.getTime();
 
-  if (Number.isNaN(start.getTime())) return 1;
+  const calculatedWeek =
+    Math.floor(
+      elapsedMilliseconds / (7 * 24 * 60 * 60 * 1000)
+    ) + 1;
 
-  const diffMs = now.getTime() - start.getTime();
-  const diffDays = Math.max(0, Math.floor(diffMs / (1000 * 60 * 60 * 24)));
-  const calculatedWeek = Math.floor(diffDays / 7) + 1;
-
-  return Math.min(Math.max(calculatedWeek, 1), maxWeek);
+  return Math.min(
+    Math.max(calculatedWeek, 1),
+    maximumWeek
+  );
 }
 
 function getWeekByNumber(weeks: Week[], weekNumber: number | null) {
@@ -341,31 +532,27 @@ function getWeekByNumber(weeks: Week[], weekNumber: number | null) {
 
 function getVisiblePlanWeekNumber(
   weeks: Week[],
-  activeWeekNumber: number,
-  completedSessions: Record<string, ManualSessionEntry>
+  activeWeekNumber: number | null,
+  _completedSessions: Record<string, ManualSessionEntry>
 ) {
-  if (!weeks.length) return 1;
+  if (!weeks.length) return null;
 
-  const maxWeek = Math.max(...weeks.map((week) => Number(week.week_number || 1)));
-  let visibleWeek = Math.min(Math.max(activeWeekNumber, 1), maxWeek);
+  const firstWeek = Math.min(
+    ...weeks.map((week) => Number(week.week_number || 1))
+  );
 
-  while (visibleWeek < maxWeek) {
-    const week = weeks.find((item) => Number(item.week_number) === visibleWeek);
-    const sessions = week?.sessions || [];
+  const maximumWeek = Math.max(
+    ...weeks.map((week) => Number(week.week_number || 1))
+  );
 
-    if (!sessions.length) break;
+  const officialWeek = Number(activeWeekNumber || firstWeek);
 
-    const isFullyCompleted = sessions.every((_, index) => {
-      const key = getProgressKey(visibleWeek, index);
-      return Boolean(completedSessions[key]?.completed);
-    });
-
-    if (!isFullyCompleted) break;
-
-    visibleWeek += 1;
-  }
-
-  return visibleWeek;
+  // Completar, perder o dejar pendiente una sesión
+  // no adelanta ni bloquea el cambio semanal.
+  return Math.min(
+    Math.max(officialWeek, firstWeek),
+    maximumWeek
+  );
 }
 
 function getSessionDistanceKm(session: Session) {
@@ -643,6 +830,7 @@ export default function App() {
 
   const [trainingPlan, setTrainingPlan] = useState<TrainingPlan | null>(null);
   const [weeks, setWeeks] = useState<Week[]>([]);
+  const [trainingCalendarClock, setTrainingCalendarClock] = useState(() => Date.now());
   const [metrics, setMetrics] = useState<MetricsResponse | null>(null);
   const [selectedSession, setSelectedSession] = useState<Session | null>(null);
   const [completedSessions, setCompletedSessions] = useState<Record<string, ManualSessionEntry>>({});
@@ -683,9 +871,51 @@ export default function App() {
   const isProCoach = planCode === "pro_coach";
   const allowedDistances = getAllowedDistances(planCode);
 
+  // TRAINING_WEEK_CLOCK_ROBUST_V4
+  useEffect(() => {
+    const refreshTrainingCalendar = () => {
+      setTrainingCalendarClock(Date.now());
+    };
+
+    const interval = window.setInterval(
+      refreshTrainingCalendar,
+      60_000
+    );
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        refreshTrainingCalendar();
+      }
+    };
+
+    document.addEventListener(
+      "visibilitychange",
+      handleVisibilityChange
+    );
+
+    window.addEventListener(
+      "focus",
+      refreshTrainingCalendar
+    );
+
+    return () => {
+      window.clearInterval(interval);
+
+      document.removeEventListener(
+        "visibilitychange",
+        handleVisibilityChange
+      );
+
+      window.removeEventListener(
+        "focus",
+        refreshTrainingCalendar
+      );
+    };
+  }, []);
+
   const activeWeekNumber = useMemo(
     () => getCurrentPlanWeekNumber(trainingPlan, weeks),
-    [trainingPlan, weeks]
+    [trainingPlan, weeks, trainingCalendarClock]
   );
 
   const visibleWeekNumber = useMemo(
@@ -1871,7 +2101,14 @@ async function fetchPlanSilently() {
                 <StatCard
                   label="Semana visible"
                   value={currentWeek ? `#${currentWeek.week_number}` : "--"}
-                  hint={currentWeek?.focus_label || "Sin plan cargado"}
+                  hint={
+                    currentWeek
+                      ? `${currentWeek.focus_label || "Semana de entrenamiento"} · ${getTrainingWeekDateRange(
+                          trainingPlan,
+                          currentWeek.week_number
+                        )}`
+                      : "Sin plan cargado"
+                  }
                 />
                 <StatCard
                   label="Km planeados"
@@ -2388,6 +2625,21 @@ async function fetchPlanSilently() {
                     <div>
                       <h2>Semana {currentWeek.week_number}</h2>
                       <p>{currentWeek.focus_label}</p>
+                      <p
+                        data-training-week-range="true"
+                        style={{
+                          marginTop: 5,
+                          color: "rgba(255,255,255,0.62)",
+                          fontSize: 13,
+                          fontWeight: 800,
+                          textTransform: "capitalize",
+                        }}
+                      >
+                        {getTrainingWeekDateRange(
+                          trainingPlan,
+                          currentWeek.week_number
+                        )}
+                      </p>
                       <span className="completion-summary">
                         {completedThisWeek} de {currentSessions.length} sesiones realizadas
                       </span>
@@ -2476,7 +2728,27 @@ async function fetchPlanSilently() {
                             onClick={() => setSelectedSession(session)}
                           >
                             <div className="session-top">
-                              <span>{session.day_of_week || "Sesión"}</span>
+                              <span>
+                                {session.day_of_week || "Sesión"}
+
+                                <small
+                                  data-session-calendar-date="true"
+                                  style={{
+                                    display: "block",
+                                    marginTop: 3,
+                                    color: "rgba(255,255,255,0.52)",
+                                    fontSize: 11,
+                                    fontWeight: 750,
+                                    textTransform: "capitalize",
+                                  }}
+                                >
+                                  {getTrainingSessionCalendarDate(
+                                    trainingPlan,
+                                    currentWeek.week_number,
+                                    session.day_of_week
+                                  )}
+                                </small>
+                              </span>
                               <em>{isCompleted ? "Realizada" : isMissed ? "No realizado" : session.intensity_zone || "General"}</em>
                             </div>
                             <h3>{session.title}</h3>
