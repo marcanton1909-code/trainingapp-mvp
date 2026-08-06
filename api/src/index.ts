@@ -651,6 +651,34 @@ function chooseWorkoutLibraryItem(
   return best[(weekNumber - 1) % best.length] || candidates[0];
 }
 
+
+function cleanVisibleMainSetText(text: string | null | undefined) {
+  const value = String(text || "").trim();
+  if (!value) return "";
+
+  const firstDot = value.indexOf(".");
+  if (firstDot <= 0) return value;
+
+  const lead = value.slice(0, firstDot).trim();
+  const rest = value.slice(firstDot + 1).trim();
+
+  if (!rest) return value;
+
+  const normalizedLead = lead
+    .replace(/[0-9]/g, "")
+    .replace(/[ÁÉÍÓÚÜÑ]/g, "A")
+    .replace(/[^A-Z\s\-]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  const looksLikeLibraryLabel =
+    lead.length <= 40 &&
+    normalizedLead.length >= 4 &&
+    normalizedLead === normalizedLead.toUpperCase();
+
+  return looksLikeLibraryLabel ? rest : value;
+}
+
 function applyWorkoutLibraryReference(
   session: SessionSeed,
   input: AthleteProfileInput,
@@ -674,13 +702,18 @@ function applyWorkoutLibraryReference(
 
   if (!item) return session;
 
-  const block = String(item.main_set_template || item.library_block || "").trim();
+  const rawBlock = String(item.main_set_template || item.library_block || "").trim();
+  const block = cleanVisibleMainSetText(rawBlock);
   const distanceText = session.distance_target
     ? ` Distancia asignada: ${session.distance_target} km objetivo.`
     : "";
 
   const shouldKeepLongRunText =
-    isLongRun && block.toUpperCase().includes("DISTANCIA DEPENDIENDO OBJETIVO");
+    isLongRun && rawBlock.toUpperCase().includes("DISTANCIA DEPENDIENDO OBJETIVO");
+
+  const composedMainSet = distanceText
+    ? `${block}${block.endsWith(".") ? "" : "."} ${distanceText.trim()}`
+    : block;
 
   return {
     ...session,
@@ -689,8 +722,8 @@ function applyWorkoutLibraryReference(
     objective: item.objective || session.objective,
     intensity_zone: item.intensity_zone || session.intensity_zone,
     main_set_text: shouldKeepLongRunText
-      ? session.main_set_text
-      : `${block}.${distanceText}`,
+      ? cleanVisibleMainSetText(session.main_set_text)
+      : composedMainSet,
   };
 }
 
@@ -4011,7 +4044,10 @@ app.get("/api/plan/:userId", async (c) => {
         focus_label: weekAny.focus_label,
         total_target_distance: weekAny.total_target_distance,
         notes: weekAny.notes,
-        sessions: sessionRows.results || [],
+        sessions: (sessionRows.results || []).map((sessionRow: any) => ({
+          ...sessionRow,
+          main_set_text: cleanVisibleMainSetText(sessionRow.main_set_text),
+        })),
       });
     }
 
