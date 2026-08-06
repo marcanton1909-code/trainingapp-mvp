@@ -1718,6 +1718,869 @@ function buildPlanStructure(
     };
   });
 }
+
+// TRAININGAPP_ADAPTIVE_SUNDAY_ENGINE_V1
+// Motor determinístico: decide carga y ritmos con datos reales.
+// Cloudflare AI se conserva para explicar el análisis semanal, no para decidir la carga.
+type AdaptiveWeekAction = "increase" | "maintain" | "reduce";
+
+type AdaptiveWeekMetrics = {
+  plannedSessions: number;
+  completedSessions: number;
+  missedSessions: number;
+  completionRate: number;
+  plannedDistanceKm: number;
+  actualDistanceKm: number;
+  distanceCompletionRate: number;
+  recentMedianPaceSecondsPerKm: number | null;
+  averageEffortScore: number | null;
+  fatigueScore: number;
+  sorenessScore: number;
+  sleepQualityScore: number;
+  hasProgressData: boolean;
+};
+
+type AdaptiveWeekDecision = {
+  action: AdaptiveWeekAction;
+  riskLevel: "low" | "medium" | "high";
+  volumeFactor: number;
+  paceDeltaSeconds: number;
+  reason: string;
+};
+
+type AdaptivePlanRow = {
+  id: string;
+  user_id: string;
+  start_date: string | null;
+  end_date: string | null;
+  created_at: string;
+};
+
+type AdaptiveWeekRow = {
+  id: string;
+  week_number: number;
+  focus_label: string | null;
+  total_target_distance: number | null;
+  notes: string | null;
+};
+
+type AdaptiveSessionRow = SessionSeed & {
+  id: string;
+  training_week_id: string;
+};
+
+function getAdaptiveMonterreyParts(date: Date) {
+  const formatter = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Monterrey",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  });
+
+  const values: Record<string, string> = {};
+  for (const part of formatter.formatToParts(date)) {
+    if (part.type !== "literal") values[part.type] = part.value;
+  }
+
+  return {
+    year: Number(values.year),
+    month: Number(values.month),
+    day: Number(values.day),
+    hour: Number(values.hour),
+    minute: Number(values.minute),
+    second: Number(values.second),
+  };
+}
+
+function adaptivePartsToUtcDate(parts: {
+  year: number;
+  month: number;
+  day: number;
+  hour?: number;
+  minute?: number;
+  second?: number;
+}) {
+  return new Date(
+    Date.UTC(
+      parts.year,
+      parts.month - 1,
+      parts.day,
+      parts.hour || 0,
+      parts.minute || 0,
+      parts.second || 0
+    )
+  );
+}
+
+function getAdaptiveMonday(date: Date) {
+  const result = new Date(date);
+  const weekDay = result.getUTCDay();
+  const daysFromMonday = weekDay === 0 ? 6 : weekDay - 1;
+  result.setUTCDate(result.getUTCDate() - daysFromMonday);
+  result.setUTCHours(0, 0, 0, 0);
+  return result;
+}
+
+function getAdaptivePlanStartMonday(plan: AdaptivePlanRow) {
+  const rawDate = plan.start_date || plan.created_at;
+
+  if (/^\d{4}-\d{2}-\d{2}$/.test(String(rawDate || ""))) {
+    const [year, month, day] = String(rawDate).split("-").map(Number);
+    return getAdaptiveMonday(new Date(Date.UTC(year, month - 1, day)));
+  }
+
+  const parsed = new Date(rawDate || plan.created_at);
+  if (Number.isNaN(parsed.getTime())) return getAdaptiveMonday(new Date());
+
+  const parts = getAdaptiveMonterreyParts(parsed);
+  return getAdaptiveMonday(adaptivePartsToUtcDate(parts));
+}
+
+function getAdaptiveTargetMonday(scheduledAt: Date) {
+  const parts = getAdaptiveMonterreyParts(scheduledAt);
+  const localDate = adaptivePartsToUtcDate(parts);
+
+  // El cron corre el domingo a las 22:00 de Monterrey.
+  // Desde ese momento se prepara la semana que inicia el lunes siguiente.
+  if (localDate.getUTCDay() === 0 && parts.hour >= 22) {
+    localDate.setUTCDate(localDate.getUTCDate() + 1);
+  }
+
+  return getAdaptiveMonday(localDate);
+}
+
+function getAdaptiveTargetWeekNumber(
+  plan: AdaptivePlanRow,
+  scheduledAt: Date,
+  maximumWeek: number
+) {
+  const planStart = getAdaptivePlanStartMonday(plan);
+  const targetMonday = getAdaptiveTargetMonday(scheduledAt);
+  const elapsed = targetMonday.getTime() - planStart.getTime();
+  const weekNumber = Math.floor(elapsed / (7 * 24 * 60 * 60 * 1000)) + 1;
+  return Math.min(Math.max(weekNumber, 1), maximumWeek + 1);
+}
+
+function averageAdaptive(values: number[]) {
+  if (!values.length) return null;
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function getAdaptiveDecision(
+  metrics: AdaptiveWeekMetrics,
+  targetWeekNumber: number,
+  maximumWeek: number
+): AdaptiveWeekDecision {
+  const poorSleep =
+    metrics.sleepQualityScore > 0 && metrics.sleepQualityScore <= 2;
+  const highRecoveryRisk =
+    metrics.fatigueScore >= 4 ||
+    metrics.sorenessScore >= 4 ||
+    poorSleep ||
+    Number(metrics.averageEffortScore || 0) >= 8.5;
+
+  const isRecoveryWeek =
+    targetWeekNumber % 4 === 0 && targetWeekNumber < maximumWeek - 1;
+  const isTaperOrFinal = targetWeekNumber >= maximumWeek - 1;
+
+  if (!metrics.hasProgressData) {
+    return {
+      action: "maintain",
+      riskLevel: "medium",
+      volumeFactor: 1,
+      paceDeltaSeconds: 5,
+      reason:
+        "No hubo registros suficientes de la semana anterior; se conserva la carga y se mantiene un ritmo prudente.",
+    };
+  }
+
+  if (highRecoveryRisk) {
+    return {
+      action: "reduce",
+      riskLevel: "high",
+      volumeFactor: 0.8,
+      paceDeltaSeconds: 15,
+      reason:
+        "Se detectaron señales de fatiga, molestias, recuperación limitada o esfuerzo excesivo; se reduce la carga y se elimina intensidad innecesaria.",
+    };
+  }
+
+  if (
+    metrics.completionRate < 0.5 ||
+    metrics.distanceCompletionRate < 0.55
+  ) {
+    return {
+      action: "reduce",
+      riskLevel: "medium",
+      volumeFactor: 0.85,
+      paceDeltaSeconds: 10,
+      reason:
+        "La adherencia o la distancia completada fue baja; se reduce moderadamente la carga para recuperar continuidad.",
+    };
+  }
+
+  const goodAdherence =
+    metrics.completionRate >= 0.85 &&
+    metrics.distanceCompletionRate >= 0.85;
+  const controlledEffort =
+    metrics.averageEffortScore === null || metrics.averageEffortScore <= 6.5;
+  const recovered =
+    metrics.fatigueScore <= 2 &&
+    metrics.sorenessScore <= 2 &&
+    !poorSleep;
+
+  if (
+    goodAdherence &&
+    controlledEffort &&
+    recovered &&
+    !isRecoveryWeek &&
+    !isTaperOrFinal
+  ) {
+    return {
+      action: "increase",
+      riskLevel: "low",
+      volumeFactor: 1.05,
+      paceDeltaSeconds: -5,
+      reason:
+        "La semana se completó con buena adherencia y esfuerzo controlado; se aplica una progresión conservadora.",
+    };
+  }
+
+  return {
+    action: "maintain",
+    riskLevel: goodAdherence ? "low" : "medium",
+    volumeFactor: 1,
+    paceDeltaSeconds: metrics.completionRate < 0.75 ? 5 : 0,
+    reason: isRecoveryWeek
+      ? "La semana programada es de descarga; se conserva su estructura para facilitar la recuperación."
+      : isTaperOrFinal
+      ? "El plan está en fase final; se evita aumentar la carga y se conserva la estructura prevista."
+      : "La respuesta al entrenamiento fue estable; se mantiene la carga prevista para consolidar adaptación.",
+  };
+}
+
+function stripAdaptivePrescription(text: string) {
+  return stripInternalWorkoutReferences(String(text || ""))
+    .replace(
+      /\s*Ritmo recomendado:\s*\d+:\d{2}\s*[–-]\s*\d+:\d{2}\s*min\/km\./gi,
+      ""
+    )
+    .replace(
+      /\s*Esfuerzo:\s*RPE\s*.*?·\s*Dificultad:\s*.*?\./gi,
+      ""
+    )
+    .replace(/\s*Sensación esperada:\s*.*$/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function replaceAdaptiveDistance(
+  text: string,
+  previousDistance: number,
+  nextDistance: number
+) {
+  if (!text || !previousDistance || previousDistance === nextDistance) return text;
+
+  const next = String(nextDistance);
+  return text
+    .replace(
+      /Distancia asignada:\s*\d+(?:\.\d+)?\s*km\s*objetivo\.?/gi,
+      `Distancia asignada: ${next} km objetivo.`
+    )
+    .replace(/por\s+\d+(?:\.\d+)?\s*km/gi, `por ${next} km`)
+    .replace(/dentro de\s+\d+(?:\.\d+)?\s*km/gi, `dentro de ${next} km`)
+    .replace(/\d+(?:\.\d+)?\s*km\s*totales/gi, `${next} km totales`);
+}
+
+function buildAdaptiveRunningInstruction(
+  session: AdaptiveSessionRow,
+  distanceKm: number,
+  convertedToEasy: boolean
+) {
+  const type = String(session.session_type || "").toLowerCase();
+
+  if (convertedToEasy) {
+    return `Rodaje aeróbico controlado por ${distanceKm} km. Mantén esfuerzo conversacional y termina con sensación de reserva.`;
+  }
+
+  if (type.includes("recovery")) {
+    return `Rodaje regenerativo por ${distanceKm} km. Debe sentirse fácil de principio a fin.`;
+  }
+
+  if (type.includes("long")) {
+    return `Tirada larga por ${distanceKm} km. Mantén esfuerzo cómodo y evita perseguir velocidad al final.`;
+  }
+
+  if (type.includes("easy")) {
+    return `Rodaje cómodo por ${distanceKm} km. Mantén respiración controlada y técnica relajada.`;
+  }
+
+  const clean = stripAdaptivePrescription(session.main_set_text);
+  return replaceAdaptiveDistance(
+    clean,
+    Number(session.distance_target || 0),
+    distanceKm
+  );
+}
+
+function adaptTrainingSession(
+  session: AdaptiveSessionRow,
+  decision: AdaptiveWeekDecision,
+  paceContext: PaceEngineContext,
+  targetWeekNumber: number,
+  maximumWeek: number
+) {
+  const previousDistance = Number(session.distance_target || 0);
+  const originalType = String(session.session_type || "").toLowerCase();
+  const hasRunningDistance = previousDistance > 0;
+  const highIntensity =
+    originalType.includes("quality") ||
+    originalType.includes("tempo") ||
+    originalType.includes("interval") ||
+    originalType.includes("fartlek") ||
+    originalType.includes("threshold") ||
+    originalType.includes("progress");
+  const convertedToEasy = decision.action === "reduce" && highIntensity;
+
+  if (!hasRunningDistance) {
+    return {
+      ...session,
+      changed: false,
+    };
+  }
+
+  let sessionFactor = decision.volumeFactor;
+  if (decision.action === "increase" && highIntensity) sessionFactor = 1;
+  if (decision.action === "increase" && originalType.includes("recovery")) {
+    sessionFactor = 1;
+  }
+
+  const nextDistance = roundToHalf(
+    clamp(previousDistance * sessionFactor, 3, previousDistance * 1.08)
+  );
+  const nextType = convertedToEasy ? "easy_run" : session.session_type;
+  const nextTitle = convertedToEasy
+    ? "Rodaje aeróbico controlado"
+    : session.title;
+  const nextObjective = convertedToEasy
+    ? "Reducir fatiga y mantener continuidad sin añadir intensidad."
+    : session.objective;
+  const nextZone = convertedToEasy ? "Z2" : session.intensity_zone;
+  const nextDuration = estimateMinutes(nextDistance, nextType);
+  const previousLoad = Number(session.estimated_load || 0);
+  const loadRatio = previousDistance > 0 ? nextDistance / previousDistance : 1;
+  const nextLoad = Math.max(
+    1,
+    Math.round(previousLoad * loadRatio * (convertedToEasy ? 0.82 : 1))
+  );
+
+  const adaptedSeed: SessionSeed = {
+    ...session,
+    session_type: nextType,
+    title: nextTitle,
+    objective: nextObjective,
+    distance_target: nextDistance,
+    duration_target: nextDuration,
+    intensity_zone: nextZone,
+    estimated_load: nextLoad,
+  };
+
+  const prescription = getSessionPacePrescription(
+    adaptedSeed,
+    targetWeekNumber,
+    maximumWeek,
+    paceContext
+  );
+
+  const instruction = buildAdaptiveRunningInstruction(
+    session,
+    nextDistance,
+    convertedToEasy
+  );
+  const paceText = `Ritmo recomendado: ${formatPace(
+    prescription.minSeconds
+  )}–${formatPace(prescription.maxSeconds)} min/km.`;
+  const effortText = `Esfuerzo: RPE ${prescription.rpe} · Dificultad: ${prescription.difficulty}.`;
+  const feelingText = `Sensación esperada: ${prescription.feeling}`;
+
+  return {
+    ...session,
+    session_type: nextType,
+    title: nextTitle,
+    objective: nextObjective,
+    distance_target: nextDistance,
+    duration_target: nextDuration,
+    intensity_zone: nextZone,
+    main_set_text: [instruction, paceText, effortText, feelingText]
+      .filter(Boolean)
+      .join(" "),
+    estimated_load: nextLoad,
+    changed: true,
+  };
+}
+
+async function getAdaptiveWeekMetrics(
+  db: D1Database,
+  userId: string,
+  planId: string,
+  sourceWeek: AdaptiveWeekRow
+): Promise<AdaptiveWeekMetrics> {
+  const sessionsResult = await db
+    .prepare(
+      `select id, distance_target
+       from training_sessions
+       where training_week_id = ?1
+       order by rowid asc`
+    )
+    .bind(sourceWeek.id)
+    .all<any>();
+
+  const sessions = sessionsResult.results || [];
+  const progressResult = await db
+    .prepare(
+      `select session_index, is_completed, actual_distance_km,
+              actual_pace_seconds_per_km, effort_score, source
+       from training_session_progress
+       where user_id = ?1
+         and week_number = ?2
+         and (training_plan_id = ?3 or training_plan_id is null)
+       order by session_index asc`
+    )
+    .bind(userId, sourceWeek.week_number, planId)
+    .all<any>();
+
+  const progress = progressResult.results || [];
+  const completedRows = progress.filter(
+    (row: any) => Number(row.is_completed) === 1
+  );
+  const plannedSessions = sessions.length;
+  const completedSessions = completedRows.length;
+  const missedSessions = Math.max(0, plannedSessions - completedSessions);
+  const completionRate = plannedSessions
+    ? completedSessions / plannedSessions
+    : 0;
+  const plannedDistanceKm = sessions.reduce(
+    (sum: number, session: any) => sum + Number(session.distance_target || 0),
+    0
+  );
+
+  const actualDistanceKm = completedRows.reduce((sum: number, row: any) => {
+    const actual = Number(row.actual_distance_km || 0);
+    if (actual > 0) return sum + actual;
+
+    const session = sessions[Number(row.session_index || 0)];
+    return sum + Number(session?.distance_target || 0);
+  }, 0);
+
+  const distanceCompletionRate = plannedDistanceKm
+    ? clamp(actualDistanceKm / plannedDistanceKm, 0, 1.25)
+    : completionRate;
+  const paces = completedRows
+    .map((row: any) => Number(row.actual_pace_seconds_per_km || 0))
+    .filter((pace: number) => pace >= 210 && pace <= 720);
+  const efforts = completedRows
+    .map((row: any) => Number(row.effort_score || 0))
+    .filter((effort: number) => effort >= 1 && effort <= 10);
+
+  let checkin: any = null;
+  try {
+    checkin = await db
+      .prepare(
+        `select fatigue_score, soreness_score, sleep_quality_score
+         from weekly_checkins
+         where user_id = ?1
+           and week_number = ?2
+           and (training_plan_id = ?3 or training_plan_id is null)
+         order by created_at desc
+         limit 1`
+      )
+      .bind(userId, sourceWeek.week_number, planId)
+      .first<any>();
+  } catch {
+    checkin = null;
+  }
+
+  return {
+    plannedSessions,
+    completedSessions,
+    missedSessions,
+    completionRate,
+    plannedDistanceKm: roundToHalf(plannedDistanceKm),
+    actualDistanceKm: roundToHalf(actualDistanceKm),
+    distanceCompletionRate,
+    recentMedianPaceSecondsPerKm: median(paces),
+    averageEffortScore: averageAdaptive(efforts),
+    fatigueScore: Number(checkin?.fatigue_score || 0),
+    sorenessScore: Number(checkin?.soreness_score || 0),
+    sleepQualityScore: Number(checkin?.sleep_quality_score || 0),
+    hasProgressData: progress.length > 0 || Boolean(checkin),
+  };
+}
+
+async function applyAdaptiveWeekForPlan(
+  env: Bindings,
+  plan: AdaptivePlanRow,
+  scheduledAt: Date
+) {
+  const access = await getEffectiveAccess(env.DB, plan.user_id);
+  if (
+    access.status !== "active" ||
+    !["performance", "pro_coach"].includes(String(access.planCode || ""))
+  ) {
+    return { status: "skipped", reason: "access_not_eligible" };
+  }
+
+  const maximumResult = await env.DB
+    .prepare(
+      `select max(week_number) as maximum_week
+       from training_weeks
+       where training_plan_id = ?1`
+    )
+    .bind(plan.id)
+    .first<{ maximum_week: number | null }>();
+
+  const maximumWeek = Number(maximumResult?.maximum_week || 0);
+  if (!maximumWeek) return { status: "skipped", reason: "plan_without_weeks" };
+
+  const targetWeekNumber = getAdaptiveTargetWeekNumber(
+    plan,
+    scheduledAt,
+    maximumWeek
+  );
+  const sourceWeekNumber = targetWeekNumber - 1;
+
+  if (targetWeekNumber > maximumWeek) {
+    return { status: "skipped", reason: "plan_finished" };
+  }
+  if (sourceWeekNumber < 1) {
+    return { status: "skipped", reason: "first_week_has_no_history" };
+  }
+
+  const previousAdjustment = await env.DB
+    .prepare(
+      `select id
+       from adaptive_week_adjustments
+       where training_plan_id = ?1
+         and target_week_number = ?2
+       limit 1`
+    )
+    .bind(plan.id, targetWeekNumber)
+    .first<{ id: string }>();
+
+  if (previousAdjustment?.id) {
+    return { status: "skipped", reason: "already_adjusted" };
+  }
+
+  const targetProgress = await env.DB
+    .prepare(
+      `select count(*) as total
+       from training_session_progress
+       where user_id = ?1
+         and week_number = ?2
+         and (training_plan_id = ?3 or training_plan_id is null)`
+    )
+    .bind(plan.user_id, targetWeekNumber, plan.id)
+    .first<{ total: number }>();
+
+  if (Number(targetProgress?.total || 0) > 0) {
+    return { status: "skipped", reason: "target_week_already_started" };
+  }
+
+  const weeksResult = await env.DB
+    .prepare(
+      `select id, week_number, focus_label, total_target_distance, notes
+       from training_weeks
+       where training_plan_id = ?1
+         and week_number in (?2, ?3)
+       order by week_number asc`
+    )
+    .bind(plan.id, sourceWeekNumber, targetWeekNumber)
+    .all<AdaptiveWeekRow>();
+
+  const weekRows = weeksResult.results || [];
+  const sourceWeek = weekRows.find(
+    (week) => Number(week.week_number) === sourceWeekNumber
+  );
+  const targetWeek = weekRows.find(
+    (week) => Number(week.week_number) === targetWeekNumber
+  );
+
+  if (!sourceWeek || !targetWeek) {
+    return { status: "skipped", reason: "source_or_target_week_missing" };
+  }
+
+  const metrics = await getAdaptiveWeekMetrics(
+    env.DB,
+    plan.user_id,
+    plan.id,
+    sourceWeek
+  );
+  const decision = getAdaptiveDecision(
+    metrics,
+    targetWeekNumber,
+    maximumWeek
+  );
+
+  const sessionsResult = await env.DB
+    .prepare(
+      `select id, training_week_id, day_of_week, session_type, title, objective,
+              distance_target, duration_target, intensity_zone,
+              warmup_text, main_set_text, cooldown_text,
+              estimated_load, status
+       from training_sessions
+       where training_week_id = ?1
+       order by rowid asc`
+    )
+    .bind(targetWeek.id)
+    .all<AdaptiveSessionRow>();
+
+  const profile = await env.DB
+    .prepare(
+      `select experience_level, current_weekly_volume
+       from athlete_profiles
+       where user_id = ?1
+       limit 1`
+    )
+    .bind(plan.user_id)
+    .first<any>();
+
+  const levelBaseline = getLevelBaselinePace(
+    String(profile?.experience_level || "Intermedio"),
+    Number(profile?.current_weekly_volume || 0)
+  );
+  const historyPace = metrics.recentMedianPaceSecondsPerKm;
+  const baselineSecondsPerKm = historyPace
+    ? clampPace(historyPace * 0.72 + levelBaseline * 0.28)
+    : levelBaseline;
+
+  const paceContext: PaceEngineContext = {
+    baselineSecondsPerKm,
+    recentMedianSecondsPerKm: historyPace,
+    completedSessions: metrics.completedSessions,
+    missedSessions: metrics.missedSessions,
+    completionRate: metrics.completionRate,
+    fatigueScore: metrics.fatigueScore,
+    sorenessScore: metrics.sorenessScore,
+    sleepQualityScore: metrics.sleepQualityScore,
+    aiDeltaSeconds: decision.paceDeltaSeconds,
+    aiReason: decision.reason,
+    source: historyPace ? "history_rules" : "level_rules",
+  };
+
+  const adaptedSessions = (sessionsResult.results || []).map((session) =>
+    adaptTrainingSession(
+      session,
+      decision,
+      paceContext,
+      targetWeekNumber,
+      maximumWeek
+    )
+  );
+  const totalTargetDistance = roundToHalf(
+    adaptedSessions.reduce(
+      (sum, session) => sum + Number(session.distance_target || 0),
+      0
+    )
+  );
+  const now = new Date().toISOString();
+  const actionLabel =
+    decision.action === "increase"
+      ? "progresión conservadora"
+      : decision.action === "reduce"
+      ? "reducción de carga"
+      : "carga mantenida";
+  const originalNotes = String(targetWeek.notes || "").trim();
+  const adaptiveNote = `Ajuste automático del domingo: ${actionLabel}. ${decision.reason}`;
+  const nextNotes = [originalNotes, adaptiveNote].filter(Boolean).join(" ");
+
+  const statements = adaptedSessions
+    .filter((session) => session.changed)
+    .map((session) =>
+      env.DB
+        .prepare(
+          `update training_sessions
+           set session_type = ?1,
+               title = ?2,
+               objective = ?3,
+               distance_target = ?4,
+               duration_target = ?5,
+               intensity_zone = ?6,
+               main_set_text = ?7,
+               estimated_load = ?8
+           where id = ?9`
+        )
+        .bind(
+          session.session_type,
+          session.title,
+          session.objective,
+          session.distance_target,
+          session.duration_target,
+          session.intensity_zone,
+          session.main_set_text,
+          session.estimated_load,
+          session.id
+        )
+    );
+
+  statements.push(
+    env.DB
+      .prepare(
+        `update training_weeks
+         set total_target_distance = ?1,
+             notes = ?2
+         where id = ?3`
+      )
+      .bind(totalTargetDistance, nextNotes, targetWeek.id)
+  );
+
+  statements.push(
+    env.DB
+      .prepare(
+        `insert or ignore into adaptive_week_adjustments (
+          id, training_plan_id, user_id, source_week_number,
+          target_week_number, status, action, risk_level,
+          volume_factor, pace_delta_seconds, completion_rate,
+          distance_completion_rate, planned_distance_km,
+          actual_distance_km, average_pace_seconds_per_km,
+          average_effort_score, fatigue_score, soreness_score,
+          sleep_quality_score, reason, source, scheduled_for,
+          applied_at, created_at
+        ) values (
+          ?1, ?2, ?3, ?4, ?5, 'applied', ?6, ?7,
+          ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
+          ?16, ?17, ?18, ?19, 'rules-v1', ?20, ?21, ?22
+        )`
+      )
+      .bind(
+        crypto.randomUUID(),
+        plan.id,
+        plan.user_id,
+        sourceWeekNumber,
+        targetWeekNumber,
+        decision.action,
+        decision.riskLevel,
+        decision.volumeFactor,
+        decision.paceDeltaSeconds,
+        metrics.completionRate,
+        metrics.distanceCompletionRate,
+        metrics.plannedDistanceKm,
+        metrics.actualDistanceKm,
+        metrics.recentMedianPaceSecondsPerKm,
+        metrics.averageEffortScore,
+        metrics.fatigueScore,
+        metrics.sorenessScore,
+        metrics.sleepQualityScore,
+        decision.reason,
+        scheduledAt.toISOString(),
+        now,
+        now
+      )
+  );
+
+  await env.DB.batch(statements);
+
+  return {
+    status: "applied",
+    planId: plan.id,
+    userId: plan.user_id,
+    sourceWeekNumber,
+    targetWeekNumber,
+    action: decision.action,
+    totalTargetDistance,
+  };
+}
+
+async function runAdaptiveSundayEngine(env: Bindings, scheduledAt: Date) {
+  const runId = crypto.randomUUID();
+  const startedAt = new Date().toISOString();
+
+  await env.DB
+    .prepare(
+      `insert into adaptive_engine_runs (
+        id, scheduled_at, started_at, status,
+        plans_seen, applied_count, skipped_count, error_count
+      ) values (?1, ?2, ?3, 'running', 0, 0, 0, 0)`
+    )
+    .bind(runId, scheduledAt.toISOString(), startedAt)
+    .run();
+
+  const plansResult = await env.DB
+    .prepare(
+      `select tp.id, tp.user_id, tp.start_date, tp.end_date, tp.created_at
+       from training_plans tp
+       where tp.status = 'active'
+         and tp.created_at = (
+           select max(tp2.created_at)
+           from training_plans tp2
+           where tp2.user_id = tp.user_id
+         )
+       order by tp.created_at asc`
+    )
+    .all<AdaptivePlanRow>();
+
+  const plans = plansResult.results || [];
+  let appliedCount = 0;
+  let skippedCount = 0;
+  let errorCount = 0;
+  const results: any[] = [];
+
+  for (const plan of plans) {
+    try {
+      const result = await applyAdaptiveWeekForPlan(env, plan, scheduledAt);
+      results.push(result);
+      if (result.status === "applied") appliedCount += 1;
+      else skippedCount += 1;
+    } catch (error) {
+      errorCount += 1;
+      results.push({
+        status: "error",
+        planId: plan.id,
+        userId: plan.user_id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      console.error("Adaptive Sunday Engine plan error", plan.id, error);
+    }
+  }
+
+  const completedAt = new Date().toISOString();
+  await env.DB
+    .prepare(
+      `update adaptive_engine_runs
+       set completed_at = ?1,
+           status = ?2,
+           plans_seen = ?3,
+           applied_count = ?4,
+           skipped_count = ?5,
+           error_count = ?6,
+           result_json = ?7
+       where id = ?8`
+    )
+    .bind(
+      completedAt,
+      errorCount > 0 ? "completed_with_errors" : "completed",
+      plans.length,
+      appliedCount,
+      skippedCount,
+      errorCount,
+      JSON.stringify(results).slice(0, 50000),
+      runId
+    )
+    .run();
+
+  return {
+    runId,
+    plansSeen: plans.length,
+    appliedCount,
+    skippedCount,
+    errorCount,
+  };
+}
+
+
 function timingSafeEqualHex(a: string, b: string) {
   if (!a || !b || a.length !== b.length) return false;
   let result = 0;
@@ -6120,4 +6983,61 @@ app.post("/api/session-progress", async (c) => {
 });
 
 
-export default app; 
+
+// TRAININGAPP_ADAPTIVE_STATUS_ENDPOINT_V1
+app.get("/api/adaptive/me", async (c) => {
+  try {
+    const auth = await requireAuthenticatedUser(c);
+    if (!auth) return jsonError(c, "No autenticado", 401);
+
+    const adjustment = await c.env.DB
+      .prepare(
+        `select source_week_number, target_week_number, status, action,
+                risk_level, volume_factor, pace_delta_seconds,
+                completion_rate, distance_completion_rate,
+                planned_distance_km, actual_distance_km,
+                average_pace_seconds_per_km, average_effort_score,
+                fatigue_score, soreness_score, sleep_quality_score,
+                reason, source, scheduled_for, applied_at
+         from adaptive_week_adjustments
+         where user_id = ?1
+         order by applied_at desc
+         limit 1`
+      )
+      .bind(auth.user.id)
+      .first<any>();
+
+    return c.json({
+      ok: true,
+      adjustment: adjustment || null,
+    });
+  } catch (error) {
+    return c.json(
+      {
+        ok: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : "No fue posible consultar el último ajuste semanal",
+      },
+      500
+    );
+  }
+});
+
+
+export default {
+  fetch(request: Request, env: Bindings, ctx: ExecutionContext) {
+    return app.fetch(request, env, ctx);
+  },
+
+  async scheduled(
+    controller: ScheduledController,
+    env: Bindings,
+    _ctx: ExecutionContext
+  ) {
+    const scheduledAt = new Date(controller.scheduledTime);
+    const result = await runAdaptiveSundayEngine(env, scheduledAt);
+    console.log("TrainingApp Adaptive Sunday Engine", result);
+  },
+}; 
