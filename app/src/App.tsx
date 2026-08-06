@@ -8,6 +8,7 @@ const PAYPAL_PERFORMANCE_PLAN_ID = "P-6GE16555S80643802NH5DTZA";
 const PAYPAL_PRO_PLAN_ID = "P-7J192125FH642021ANH5DTZA";
 
 const AUTH_TOKEN_KEY = "trainingapp_auth_token";
+const TRIAL_DEVICE_ID_KEY = "trainingapp_trial_device_id";
 const STRAVA_REVIEW_QUERY_PARAM = "strava_review";
 const STRAVA_PUBLIC_VISIBLE = false;
 
@@ -54,6 +55,17 @@ type Entitlements = {
   can_regenerate_with_history?: number;
   can_use_premium_planning?: number;
   source_plan_code?: string | null;
+};
+
+type TrialStatus = {
+  status: "active" | "expired" | "converted" | "unavailable" | string;
+  plan_code?: string | null;
+  started_at?: string | null;
+  expires_at?: string | null;
+  expired_at?: string | null;
+  converted_at?: string | null;
+  duration_days?: number;
+  reason?: string | null;
 };
 
 type StravaStatus = {
@@ -719,6 +731,25 @@ function getAiRiskLabel(value: AiPlanReview["risk_level"]) {
   return "bajo";
 }
 
+function getOrCreateTrialDeviceId() {
+  const existing = localStorage.getItem(TRIAL_DEVICE_ID_KEY);
+  if (existing) return existing;
+
+  const next =
+    typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+  localStorage.setItem(TRIAL_DEVICE_ID_KEY, next);
+  return next;
+}
+
+function getTrialDaysRemaining(expiresAt?: string | null) {
+  if (!expiresAt) return 0;
+  const remaining = new Date(expiresAt).getTime() - Date.now();
+  return Math.max(0, Math.ceil(remaining / (24 * 60 * 60 * 1000)));
+}
+
 function getAiAdjustmentLabel(value: AiPlanReview["load_adjustment"]) {
   if (value === "reduce") return "reducir carga";
   if (value === "increase") return "subir con cuidado";
@@ -732,6 +763,7 @@ export default function App() {
   const [authUser, setAuthUser] = useState<AuthUser | null>(null);
   const [membership, setMembership] = useState<Membership | null>(null);
   const [entitlements, setEntitlements] = useState<Entitlements | null>(null);
+  const [trial, setTrial] = useState<TrialStatus | null>(null);
   const [strava, setStrava] = useState<StravaStatus>({
     connected: false,
     status: "not_connected",
@@ -864,6 +896,10 @@ export default function App() {
   const planCode =
     entitlements?.source_plan_code || membership?.plan_code || null;
   const hasActiveMembership = Boolean(entitlements?.has_active_membership);
+  const hasPaidMembership = membership?.status === "active";
+  const trialExpired = !hasPaidMembership && trial?.status === "expired";
+  const trialActive = !hasPaidMembership && trial?.status === "active";
+  const trialDaysRemaining = getTrialDaysRemaining(trial?.expires_at);
   const canConnectStrava = Boolean(entitlements?.can_connect_strava);
   const stravaReviewMode = isStravaReviewEnabled();
   const showStravaIntegration = STRAVA_PUBLIC_VISIBLE || stravaReviewMode;
@@ -1077,6 +1113,18 @@ export default function App() {
     renderPayPalButton(proRef, PAYPAL_PRO_PLAN_ID, "Pro Coach");
   }, [activeTab, paypalReady, authUser?.id]);
 
+  useEffect(() => {
+    if (
+      authUser &&
+      trialExpired &&
+      activeTab !== "membership" &&
+      activeTab !== "profile"
+    ) {
+      setActiveTab("membership");
+      setResult("Tu prueba gratuita terminó. Suscríbete a Performance para continuar.");
+    }
+  }, [authUser?.id, trialExpired, activeTab]);
+
   function goToAuthTab(tab: "login" | "register") {
     setActiveTab(tab);
 
@@ -1104,6 +1152,7 @@ export default function App() {
     setAuthUser(data.user || null);
     setMembership(data.membership || null);
     setEntitlements(data.entitlements || null);
+    setTrial(data.trial || null);
     setStrava(
       data.strava || {
         connected: false,
@@ -1344,7 +1393,10 @@ async function fetchPlanSilently() {
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify(registerForm),
+        body: JSON.stringify({
+          ...registerForm,
+          deviceId: getOrCreateTrialDeviceId(),
+        }),
       });
 
       const data = await res.json();
@@ -1356,8 +1408,13 @@ async function fetchPlanSilently() {
       localStorage.setItem(AUTH_TOKEN_KEY, data.token);
       setAuthToken(data.token);
       await refreshMe(data.token);
-      setActiveTab("onboarding");
-      setResult("Cuenta creada. Completa tu perfil para generar tu plan.");
+      if (data.trial?.status === "active") {
+        setActiveTab("onboarding");
+        setResult("Prueba Performance activa por 14 días. Completa tu perfil para generar tu plan.");
+      } else {
+        setActiveTab("membership");
+        setResult("Cuenta creada. La promoción de prueba no está disponible para este dispositivo o ya agotó sus cupos.");
+      }
     } catch (error) {
       setResult(error instanceof Error ? error.message : "Error inesperado");
     } finally {
@@ -1383,6 +1440,7 @@ async function fetchPlanSilently() {
       setAuthUser(null);
       setMembership(null);
       setEntitlements(null);
+      setTrial(null);
       setStrava({ connected: false, status: "not_connected" });
       setWeeks([]);
       setMetrics(null);
@@ -2096,7 +2154,13 @@ async function fetchPlanSilently() {
                 <StatCard
                   label="Membresía"
                   value={getPlanLabel(planCode)}
-                  hint={getStatusLabel(membership?.status)}
+                  hint={
+                    trialActive
+                      ? `Prueba gratuita · ${trialDaysRemaining} días restantes`
+                      : trialExpired
+                      ? "Prueba finalizada"
+                      : getStatusLabel(membership?.status)
+                  }
                 />
                 <StatCard
                   label="Semana visible"
@@ -2890,12 +2954,31 @@ async function fetchPlanSilently() {
               />
 
               <BetaBanner />
+
+              {trialActive && (
+                <div className="notice trial-notice">
+                  Prueba Performance activa. Te quedan {trialDaysRemaining} días.
+                </div>
+              )}
+
+              {trialExpired && (
+                <div className="trial-expired-card">
+                  <span className="chip lime">Prueba finalizada</span>
+                  <h2>Tu prueba gratuita de 14 días terminó</h2>
+                  <p>
+                    Tu perfil, plan y progreso siguen guardados. Suscríbete a
+                    Performance para continuar exactamente donde te quedaste.
+                  </p>
+                </div>
+              )}
+
               {showStravaIntegration && <StravaReviewNotice />}
 
               {paypalLoading && <div className="notice">Cargando PayPal...</div>}
               {paypalError && <div className="notice error">{paypalError}</div>}
 
               <div className="pricing-grid">
+                {!trialExpired && (
                 <PlanCard
                   title="Starter"
                   price="$149 MXN"
@@ -2910,6 +2993,8 @@ async function fetchPlanSilently() {
                   ]}
                   paypalRef={starterRef}
                 />
+
+                )}
 
                 <PlanCard
                   title="Performance"
@@ -2933,6 +3018,7 @@ async function fetchPlanSilently() {
                   paypalRef={performanceRef}
                 />
 
+                {!trialExpired && (
                 <PlanCard
                   title="Pro Coach"
                   price="$449 MXN"
@@ -2947,6 +3033,7 @@ async function fetchPlanSilently() {
                   ]}
                   paypalRef={proRef}
                 />
+                )}
               </div>
             </section>
           )}
@@ -2963,7 +3050,16 @@ async function fetchPlanSilently() {
                 <StatCard label="Nombre" value={authUser.name} />
                 <StatCard label="Correo" value={authUser.email} />
                 <StatCard label="Plan" value={getPlanLabel(planCode)} />
-                <StatCard label="Estado" value={getStatusLabel(membership?.status)} />
+                <StatCard
+                  label="Estado"
+                  value={
+                    trialActive
+                      ? `Prueba · ${trialDaysRemaining} días`
+                      : trialExpired
+                      ? "Prueba finalizada"
+                      : getStatusLabel(membership?.status)
+                  }
+                />
                 {showStravaIntegration && (
                   <StatCard
                     label="Compatible with Strava"
@@ -4986,5 +5082,29 @@ button:disabled {
 
 }
 
+
+
+.trial-notice {
+  border-color: rgba(188, 255, 43, 0.28);
+  background: rgba(188, 255, 43, 0.08);
+}
+
+.trial-expired-card {
+  margin: 18px 0;
+  padding: 24px;
+  border: 1px solid rgba(188, 255, 43, 0.22);
+  border-radius: 24px;
+  background: rgba(188, 255, 43, 0.06);
+}
+
+.trial-expired-card h2 {
+  margin: 16px 0 10px;
+}
+
+.trial-expired-card p {
+  margin: 0;
+  color: rgba(255, 255, 255, 0.72);
+  line-height: 1.65;
+}
 
 `;

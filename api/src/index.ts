@@ -174,6 +174,7 @@ type AuthRegisterInput = {
   name?: string;
   email?: string;
   password?: string;
+  deviceId?: string;
 };
 
 type AuthLoginInput = {
@@ -1942,12 +1943,108 @@ async function getLatestMembership(db: D1Database, userId: string) {
     .first<{ id: string; plan_code: string | null; status: string | null }>();
 }
 
-async function refreshUserEntitlements(db: D1Database, userId: string) {
+
+type TrialRow = {
+  id: string;
+  user_id: string;
+  campaign_id: string;
+  plan_code: string;
+  status: string;
+  started_at: string;
+  expires_at: string;
+  converted_at?: string | null;
+  expired_at?: string | null;
+};
+
+async function getUserTrial(db: D1Database, userId: string) {
+  const trial = await db
+    .prepare(
+      `select id, user_id, campaign_id, plan_code, status, started_at, expires_at,
+              converted_at, expired_at
+       from user_trials
+       where user_id = ?1
+       limit 1`
+    )
+    .bind(userId)
+    .first<TrialRow>();
+
+  if (!trial) return null;
+
+  if (
+    trial.status === "active" &&
+    new Date(trial.expires_at).getTime() <= Date.now()
+  ) {
+    const now = new Date().toISOString();
+    await db
+      .prepare(
+        `update user_trials
+         set status = 'expired', expired_at = coalesce(expired_at, ?1), updated_at = ?2
+         where id = ?3 and status = 'active'`
+      )
+      .bind(now, now, trial.id)
+      .run();
+
+    return {
+      ...trial,
+      status: "expired",
+      expired_at: trial.expired_at || now,
+    };
+  }
+
+  return trial;
+}
+
+async function getEffectiveAccess(db: D1Database, userId: string) {
   const membership = await getLatestMembership(db, userId);
 
+  if (membership?.status === "active") {
+    return {
+      source: "membership" as const,
+      planCode: membership.plan_code || null,
+      status: "active",
+      membership,
+      trial: await getUserTrial(db, userId),
+    };
+  }
+
+  const trial = await getUserTrial(db, userId);
+  if (trial?.status === "active") {
+    return {
+      source: "trial" as const,
+      planCode: trial.plan_code || "performance",
+      status: "active",
+      membership: null,
+      trial,
+    };
+  }
+
+  return {
+    source: "none" as const,
+    planCode: null,
+    status: "inactive",
+    membership: membership || null,
+    trial,
+  };
+}
+
+async function markTrialConverted(db: D1Database, userId: string) {
+  const now = new Date().toISOString();
+  await db
+    .prepare(
+      `update user_trials
+       set status = 'converted', converted_at = coalesce(converted_at, ?1), updated_at = ?2
+       where user_id = ?3 and status in ('active', 'expired')`
+    )
+    .bind(now, now, userId)
+    .run();
+}
+
+async function refreshUserEntitlements(db: D1Database, userId: string) {
+  const access = await getEffectiveAccess(db, userId);
+
   const values = getEntitlementsFromPlan(
-    membership?.plan_code || null,
-    membership?.status || null
+    access.planCode,
+    access.status
   );
 
   const existing = await db
@@ -2067,8 +2164,8 @@ async function requireAuthenticatedUser(c: Context<{ Bindings: Bindings }>) {
 }
 
 async function hasActiveMembership(db: D1Database, userId: string) {
-  const membership = await getLatestMembership(db, userId);
-  return membership?.status === "active";
+  const access = await getEffectiveAccess(db, userId);
+  return access.status === "active";
 }
 
 async function validateDistanceForMembership(
@@ -2076,15 +2173,16 @@ async function validateDistanceForMembership(
   userId: string,
   distance: string
 ) {
-  const membership = await getLatestMembership(db, userId);
-  const planCode = membership?.plan_code || null;
-  const status = membership?.status || null;
-  const active = status === "active";
+  const access = await getEffectiveAccess(db, userId);
+  const planCode = access.planCode;
+  const active = access.status === "active";
 
   if (!active) {
     return {
       ok: false,
-      message: "Se requiere una membresía activa para generar el plan.",
+      message: access.trial?.status === "expired"
+        ? "Tu prueba gratuita terminó. Suscríbete a Performance para continuar."
+        : "Se requiere una membresía activa para generar el plan.",
       planCode,
       allowedDistances: [],
     };
@@ -2112,7 +2210,6 @@ async function validateDistanceForMembership(
     allowedDistances,
   };
 }
-
 
 async function isUxFeedbackUser(db: D1Database, userId: string) {
   const row = await db
@@ -3183,12 +3280,15 @@ app.get("/api/paypal/config", (c) => {
 });
 
 app.post("/api/auth/register", async (c) => {
+  let claimedCampaignId: string | null = null;
+
   try {
     const body = (await c.req.json()) as AuthRegisterInput;
 
     const name = body.name?.trim() || "";
     const email = normalizeEmail(body.email || "");
     const password = body.password || "";
+    const rawDeviceId = String(body.deviceId || "").trim();
 
     if (!name) return jsonError(c, "El nombre es obligatorio");
     if (!email) return jsonError(c, "El correo es obligatorio");
@@ -3206,11 +3306,104 @@ app.post("/api/auth/register", async (c) => {
       return jsonError(c, "Ese correo ya está registrado", 409);
     }
 
+    const ipAddress = c.req.header("cf-connecting-ip") || "";
+    const userAgent = c.req.header("user-agent") || "";
+    const deviceSource = rawDeviceId || `${userAgent}:${ipAddress}`;
+    const deviceHash = await sha256Text(
+      `trial-device:${deviceSource}:${c.env.SESSION_SECRET}`
+    );
+    const ipHash = ipAddress
+      ? await sha256Text(`trial-ip:${ipAddress}:${c.env.SESSION_SECRET}`)
+      : null;
+    const userAgentHash = userAgent
+      ? await sha256Text(`trial-ua:${userAgent}:${c.env.SESSION_SECRET}`)
+      : null;
+
+    const previousDeviceTrial = await c.env.DB
+      .prepare(
+        `select id
+         from user_trials
+         where device_hash = ?1
+         limit 1`
+      )
+      .bind(deviceHash)
+      .first<{ id: string }>();
+
+    const campaign = await c.env.DB
+      .prepare(
+        `select id, plan_code, duration_days, max_trials, trials_started
+         from trial_campaigns
+         where campaign_code = 'performance_trial_14d_50'
+           and is_active = 1
+           and (starts_at is null or starts_at <= datetime('now'))
+           and (ends_at is null or ends_at > datetime('now'))
+         limit 1`
+      )
+      .first<{
+        id: string;
+        plan_code: string;
+        duration_days: number;
+        max_trials: number;
+        trials_started: number;
+      }>();
+
+    let trialAssigned = false;
+    let trialReason = "unavailable";
+
+    if (previousDeviceTrial?.id) {
+      trialReason = "device_already_used";
+    } else if (campaign?.id) {
+      let ipTrialCount = 0;
+      if (ipHash) {
+        const ipCount = await c.env.DB
+          .prepare(
+            `select count(*) as total
+             from user_trials
+             where signup_ip_hash = ?1
+               and created_at >= datetime('now', '-30 days')`
+          )
+          .bind(ipHash)
+          .first<{ total: number }>();
+        ipTrialCount = Number(ipCount?.total || 0);
+      }
+
+      if (ipTrialCount >= 3) {
+        trialReason = "ip_limit_reached";
+      } else {
+        const claim = await c.env.DB
+          .prepare(
+            `update trial_campaigns
+             set trials_started = trials_started + 1,
+                 updated_at = ?1
+             where id = ?2
+               and is_active = 1
+               and trials_started < max_trials`
+          )
+          .bind(new Date().toISOString(), campaign.id)
+          .run();
+
+        trialAssigned = Number((claim.meta as any)?.changes || 0) > 0;
+        if (trialAssigned) {
+          claimedCampaignId = campaign.id;
+          trialReason = "assigned";
+        } else {
+          trialReason = "campaign_full";
+        }
+      }
+    }
+
     const now = new Date().toISOString();
     const userId = crypto.randomUUID();
     const passwordHash = await hashPassword(password);
+    const trialPlanCode = campaign?.plan_code || "performance";
+    const trialExpiresAt = new Date(
+      Date.now() + 1000 * 60 * 60 * 24 * Number(campaign?.duration_days || 14)
+    ).toISOString();
+    const initialEntitlements = trialAssigned
+      ? getEntitlementsFromPlan(trialPlanCode, "active")
+      : getEntitlementsFromPlan(null, null);
 
-    await c.env.DB.batch([
+    const statements = [
       c.env.DB
         .prepare(
           `insert into users (
@@ -3224,10 +3417,50 @@ app.post("/api/auth/register", async (c) => {
             id, user_id, has_active_membership, can_generate_base_plan,
             can_connect_strava, can_use_strava_metrics, can_generate_advanced_plan,
             can_regenerate_with_history, can_use_premium_planning, source_plan_code, updated_at
-          ) values (?1, ?2, 0, 0, 0, 0, 0, 0, 0, null, ?3)`
+          ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)`
         )
-        .bind(crypto.randomUUID(), userId, now),
-    ]);
+        .bind(
+          crypto.randomUUID(),
+          userId,
+          initialEntitlements.has_active_membership,
+          initialEntitlements.can_generate_base_plan,
+          initialEntitlements.can_connect_strava,
+          initialEntitlements.can_use_strava_metrics,
+          initialEntitlements.can_generate_advanced_plan,
+          initialEntitlements.can_regenerate_with_history,
+          initialEntitlements.can_use_premium_planning,
+          initialEntitlements.source_plan_code,
+          now
+        ),
+    ];
+
+    if (trialAssigned && campaign?.id) {
+      statements.push(
+        c.env.DB
+          .prepare(
+            `insert into user_trials (
+              id, user_id, campaign_id, plan_code, status, started_at, expires_at,
+              converted_at, expired_at, device_hash, signup_ip_hash, user_agent_hash,
+              created_at, updated_at
+            ) values (?1, ?2, ?3, ?4, 'active', ?5, ?6, null, null, ?7, ?8, ?9, ?10, ?11)`
+          )
+          .bind(
+            crypto.randomUUID(),
+            userId,
+            campaign.id,
+            trialPlanCode,
+            now,
+            trialExpiresAt,
+            deviceHash,
+            ipHash,
+            userAgentHash,
+            now,
+            now
+          )
+      );
+    }
+
+    await c.env.DB.batch(statements);
 
     const rawToken = createSessionToken();
     const tokenHash = await sha256Text(`${rawToken}:${c.env.SESSION_SECRET}`);
@@ -3247,21 +3480,42 @@ app.post("/api/auth/register", async (c) => {
         tokenHash,
         expiresAt,
         now,
-        c.req.header("user-agent") || null,
-        c.req.header("cf-connecting-ip") || null
+        userAgent || null,
+        ipAddress || null
       )
       .run();
 
     return c.json({
       ok: true,
       token: rawToken,
-      user: {
-        id: userId,
-        email,
-        name,
-      },
+      user: { id: userId, email, name },
+      trial: trialAssigned
+        ? {
+            status: "active",
+            plan_code: trialPlanCode,
+            started_at: now,
+            expires_at: trialExpiresAt,
+            duration_days: Number(campaign?.duration_days || 14),
+          }
+        : {
+            status: "unavailable",
+            reason: trialReason,
+          },
     });
   } catch (error) {
+    if (claimedCampaignId) {
+      await c.env.DB
+        .prepare(
+          `update trial_campaigns
+           set trials_started = case when trials_started > 0 then trials_started - 1 else 0 end,
+               updated_at = ?1
+           where id = ?2`
+        )
+        .bind(new Date().toISOString(), claimedCampaignId)
+        .run()
+        .catch(() => undefined);
+    }
+
     return c.json(
       {
         ok: false,
@@ -3376,6 +3630,8 @@ app.get("/api/auth/me", async (c) => {
       return jsonError(c, "No autenticado", 401);
     }
 
+    await refreshUserEntitlements(c.env.DB, auth.user.id);
+
     const entitlements = await c.env.DB
       .prepare(
         `select
@@ -3396,6 +3652,8 @@ app.get("/api/auth/me", async (c) => {
       .first<EntitlementsRow>();
 
     const membership = await getLatestMembership(c.env.DB, auth.user.id);
+    const trial = await getUserTrial(c.env.DB, auth.user.id);
+    const access = await getEffectiveAccess(c.env.DB, auth.user.id);
     const strava = await getStravaConnection(c.env.DB, auth.user.id);
 
     return c.json({
@@ -3403,6 +3661,12 @@ app.get("/api/auth/me", async (c) => {
       user: auth.user,
       membership: membership || null,
       entitlements: entitlements || null,
+      trial: trial || null,
+      access: {
+        source: access.source,
+        planCode: access.planCode,
+        status: access.status,
+      },
       strava: strava
         ? {
             connected: true,
@@ -3589,8 +3853,8 @@ app.post("/api/onboarding", async (c) => {
       return jsonError(c, "Usuario no encontrado", 404);
     }
 
-    const membership = await getLatestMembership(c.env.DB, body.userId);
-    if (membership?.status === "active") {
+    const effectiveAccess = await getEffectiveAccess(c.env.DB, body.userId);
+    if (effectiveAccess.status === "active") {
       const allowed = await validateDistanceForMembership(
         c.env.DB,
         body.userId,
@@ -4125,10 +4389,10 @@ app.get("/api/strava/connect-url", async (c) => {
       return jsonError(c, "No autenticado", 401);
     }
 
-    const membership = await getLatestMembership(c.env.DB, auth.user.id);
+    const access = await getEffectiveAccess(c.env.DB, auth.user.id);
     const entitlements = getEntitlementsFromPlan(
-      membership?.plan_code || null,
-      membership?.status || null
+      access.planCode,
+      access.status
     );
 
     if (!entitlements.can_connect_strava) {
@@ -5042,6 +5306,8 @@ app.post("/api/paypal/link-subscription", async (c) => {
     } | null = null;
 
     if (membershipStatus === "active") {
+      await markTrialConverted(c.env.DB, userId);
+      await refreshUserEntitlements(c.env.DB, userId);
       try {
         autoPlan = await ensurePlanForUser(c.env.DB, userId, c.env);
       } catch (error) {
@@ -5258,6 +5524,8 @@ app.post("/api/paypal/webhook", async (c) => {
       await refreshUserEntitlements(c.env.DB, linkedUserId);
 
       if (membershipStatus === "active") {
+        await markTrialConverted(c.env.DB, linkedUserId);
+        await refreshUserEntitlements(c.env.DB, linkedUserId);
         try {
           autoPlan = await ensurePlanForUser(c.env.DB, linkedUserId, c.env);
         } catch (error) {
@@ -5518,9 +5786,15 @@ app.post("/api/ai/plan-review", async (c) => {
       return jsonError(c, "No autenticado", 401);
     }
 
-    const membership = await getLatestMembership(c.env.DB, auth.user.id);
-    if (membership?.status !== "active") {
-      return jsonError(c, "Se requiere una membresía activa para usar IA.", 403);
+    const access = await getEffectiveAccess(c.env.DB, auth.user.id);
+    if (access.status !== "active") {
+      return jsonError(
+        c,
+        access.trial?.status === "expired"
+          ? "Tu prueba gratuita terminó. Suscríbete a Performance para continuar."
+          : "Se requiere una membresía activa para usar IA.",
+        403
+      );
     }
 
     const body = (await c.req.json().catch(() => ({}))) as {
