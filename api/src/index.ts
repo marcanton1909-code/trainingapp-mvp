@@ -6715,6 +6715,7 @@ app.post("/api/ai/plan-review", async (c) => {
 });
 
 
+// TRAININGAPP_PROGRESS_PLAN_ISOLATION_API_V1
 app.get("/api/session-progress/me", async (c) => {
   try {
     const auth = await requireAuthenticatedUser(c);
@@ -6722,6 +6723,47 @@ app.get("/api/session-progress/me", async (c) => {
       return jsonError(c, "No autenticado", 401);
     }
     const userId = auth.user.id;
+
+    let trainingPlanId = String(
+      c.req.query("trainingPlanId") || ""
+    ).trim();
+
+    if (!trainingPlanId) {
+      const latestPlan = await c.env.DB
+        .prepare(
+          `select id
+           from training_plans
+           where user_id = ?1
+           order by created_at desc
+           limit 1`
+        )
+        .bind(userId)
+        .first<{ id: string }>();
+
+      trainingPlanId = String(latestPlan?.id || "");
+    }
+
+    if (!trainingPlanId) {
+      return c.json({
+        ok: true,
+        progress: [],
+      });
+    }
+
+    const ownedPlan = await c.env.DB
+      .prepare(
+        `select id
+         from training_plans
+         where id = ?1
+           and user_id = ?2
+         limit 1`
+      )
+      .bind(trainingPlanId, userId)
+      .first<{ id: string }>();
+
+    if (!ownedPlan?.id) {
+      return jsonError(c, "Plan no válido para este usuario", 403);
+    }
 
     const rows = await c.env.DB
       .prepare(
@@ -6746,13 +6788,15 @@ app.get("/api/session-progress/me", async (c) => {
            updated_at
          from training_session_progress
          where user_id = ?1
+           and training_plan_id = ?2
          order by week_number asc, session_index asc`
       )
-      .bind(userId)
+      .bind(userId, trainingPlanId)
       .all();
 
     return c.json({
       ok: true,
+      trainingPlanId,
       progress: rows.results || [],
     });
   } catch (error) {
@@ -6803,17 +6847,45 @@ app.post("/api/session-progress", async (c) => {
       );
     }
 
-    const existing = await c.env.DB
-      .prepare(
-        `select id
-         from training_session_progress
-         where user_id = ?1
-           and week_number = ?2
-           and session_index = ?3
-         limit 1`
-      )
-      .bind(userId, weekNumber, sessionIndex)
-      .first<{ id: string }>();
+    const requestTrainingPlanId =
+      body.trainingPlanId || body.training_plan_id || null;
+    const requestTrainingWeekId =
+      body.trainingWeekId || body.training_week_id || null;
+    const requestTrainingSessionId =
+      body.trainingSessionId || body.training_session_id || null;
+
+    let existing: { id: string } | null = null;
+
+    if (requestTrainingSessionId) {
+      existing = await c.env.DB
+        .prepare(
+          `select id
+           from training_session_progress
+           where user_id = ?1
+             and training_session_id = ?2
+           limit 1`
+        )
+        .bind(userId, requestTrainingSessionId)
+        .first<{ id: string }>();
+    } else if (requestTrainingPlanId) {
+      existing = await c.env.DB
+        .prepare(
+          `select id
+           from training_session_progress
+           where user_id = ?1
+             and training_plan_id = ?2
+             and week_number = ?3
+             and session_index = ?4
+           limit 1`
+        )
+        .bind(
+          userId,
+          requestTrainingPlanId,
+          weekNumber,
+          sessionIndex
+        )
+        .first<{ id: string }>();
+    }
 
     const isCompleted = body.isCompleted ?? body.is_completed ? 1 : 0;
 
@@ -6839,15 +6911,14 @@ app.post("/api/session-progress", async (c) => {
         ? null
         : Number(body.actualPaceSecondsPerKm);
 
+    // El ritmo manual solo existe si el atleta lo registró explícitamente.
+    // No calcularlo con distancia/duración objetivo.
     if (
-      (!actualPaceSecondsPerKm || Number.isNaN(actualPaceSecondsPerKm)) &&
-      actualDistanceKm &&
-      actualDurationMinutes &&
-      actualDistanceKm > 0
+      actualPaceSecondsPerKm !== null &&
+      (!Number.isFinite(actualPaceSecondsPerKm) ||
+        actualPaceSecondsPerKm <= 0)
     ) {
-      actualPaceSecondsPerKm = Math.round(
-        (actualDurationMinutes * 60) / actualDistanceKm
-      );
+      actualPaceSecondsPerKm = null;
     }
 
     const effortScore =
@@ -6856,10 +6927,9 @@ app.post("/api/session-progress", async (c) => {
         : Number(body.effortScore);
 
     const payload = {
-      trainingPlanId: body.trainingPlanId || body.training_plan_id || null,
-      trainingWeekId: body.trainingWeekId || body.training_week_id || null,
-      trainingSessionId:
-        body.trainingSessionId || body.training_session_id || null,
+      trainingPlanId: requestTrainingPlanId,
+      trainingWeekId: requestTrainingWeekId,
+      trainingSessionId: requestTrainingSessionId,
       sessionTitle: body.sessionTitle || body.session_title || null,
       notes: body.notes || null,
       source: body.source || "manual",

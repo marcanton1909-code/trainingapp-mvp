@@ -1019,10 +1019,13 @@ export default function App() {
     }
   }, []);
 
+  // TRAININGAPP_PROGRESS_PLAN_ISOLATION_FRONT_V1
+  // El progreso solo se carga cuando conocemos el plan actual.
+  // Esto evita que una semana nueva herede estados/ritmos de planes anteriores.
   useEffect(() => {
-    if (!authUser?.id || !authToken) return;
-    fetchSessionProgressSilently();
-  }, [authUser?.id, authToken]);
+    if (!authUser?.id || !authToken || !trainingPlan?.id) return;
+    fetchSessionProgressSilently(trainingPlan.id);
+  }, [authUser?.id, authToken, trainingPlan?.id]);
 
   useEffect(() => {
     async function boot() {
@@ -1167,11 +1170,25 @@ export default function App() {
     }));
   }
 
-  async function fetchSessionProgressSilently() {
+  async function fetchSessionProgressSilently(
+    requestedTrainingPlanId?: string | null
+  ) {
     if (!authToken) return;
 
+    const effectiveTrainingPlanId =
+      requestedTrainingPlanId || trainingPlan?.id || null;
+
+    if (!effectiveTrainingPlanId) {
+      setCompletedSessions({});
+      return;
+    }
+
     try {
-      const res = await fetch(`${API_URL}/api/session-progress/me`, {
+      const progressUrl =
+        `${API_URL}/api/session-progress/me?trainingPlanId=` +
+        encodeURIComponent(effectiveTrainingPlanId);
+
+      const res = await fetch(progressUrl, {
         headers: {
           Authorization: `Bearer ${authToken}`,
         },
@@ -1185,6 +1202,13 @@ export default function App() {
       const next: Record<string, ManualSessionEntry> = {};
 
       rows.forEach((row: any) => {
+        if (
+          row.training_plan_id &&
+          String(row.training_plan_id) !== String(effectiveTrainingPlanId)
+        ) {
+          return;
+        }
+
         const key = getProgressKey(
           Number(row.week_number),
           Number(row.session_index)
@@ -1223,7 +1247,7 @@ async function fetchPlanSilently() {
       if (res.ok) {
         setTrainingPlan(data.plan || null);
         setWeeks(data.weeks || []);
-        await fetchSessionProgressSilently();
+        await fetchSessionProgressSilently(data.plan?.id || null);
 
         const savedDistance =
           normalizeDistance(data.runnerGoal?.target_distance) ||
