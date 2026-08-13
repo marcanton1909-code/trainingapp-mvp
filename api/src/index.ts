@@ -3718,6 +3718,324 @@ async function createTrainingPlanForUser(
 }
 
 
+
+// TRAININGAPP_PLAN_ANCHOR_HELPER_V1
+function getPlanAnchorMondayDayNumber(
+  startDate?: string | null
+) {
+  /*
+   * training_plans.start_date viene como YYYY-MM-DD.
+   * Convertimos esa fecha a un número entero de días UTC
+   * y después obtenemos el lunes de esa misma semana.
+   *
+   * Este cálculo evita problemas de timezone al interpretar
+   * directamente "YYYY-MM-DD" con new Date().
+   */
+  const match = String(startDate || "").match(
+    /^(\d{4})-(\d{2})-(\d{2})/
+  );
+
+  if (!match) {
+    /*
+     * Fallback únicamente para planes antiguos sin fecha válida.
+     * El rolling plan normalmente nunca llega aquí porque
+     * exige plan.start_date.
+     */
+    const now = new Date();
+
+    const todayDayNumber = Math.floor(
+      Date.UTC(
+        now.getUTCFullYear(),
+        now.getUTCMonth(),
+        now.getUTCDate()
+      ) / 86400000
+    );
+
+    const weekday = new Date(
+      todayDayNumber * 86400000
+    ).getUTCDay();
+
+    const daysSinceMonday =
+      (weekday + 6) % 7;
+
+    return todayDayNumber - daysSinceMonday;
+  }
+
+  const dayNumber = Math.floor(
+    Date.UTC(
+      Number(match[1]),
+      Number(match[2]) - 1,
+      Number(match[3])
+    ) / 86400000
+  );
+
+  const date = new Date(
+    dayNumber * 86400000
+  );
+
+  const weekday =
+    date.getUTCDay();
+
+  const daysSinceMonday =
+    (weekday + 6) % 7;
+
+  return dayNumber - daysSinceMonday;
+}
+
+
+
+
+// TRAININGAPP_CALENDAR_HELPERS_RESTORED_V1
+
+function formatTrainingDayNumber(
+  dayNumber: number
+) {
+  return new Date(
+    dayNumber * 86400000
+  )
+    .toISOString()
+    .slice(0, 10);
+}
+
+
+function parseTrainingDateToDayNumber(
+  value?: string | null
+) {
+  const match = String(
+    value || ""
+  ).match(
+    /^(\d{4})-(\d{2})-(\d{2})/
+  );
+
+  if (!match) {
+    return null;
+  }
+
+  const dayNumber = Math.floor(
+    Date.UTC(
+      Number(match[1]),
+      Number(match[2]) - 1,
+      Number(match[3])
+    ) / 86400000
+  );
+
+  return Number.isFinite(dayNumber)
+    ? dayNumber
+    : null;
+}
+
+
+function getMondayForDayNumber(
+  dayNumber: number
+) {
+  const date = new Date(
+    dayNumber * 86400000
+  );
+
+  const weekday =
+    date.getUTCDay();
+
+  const daysSinceMonday =
+    (weekday + 6) % 7;
+
+  return (
+    dayNumber -
+    daysSinceMonday
+  );
+}
+
+
+function getLogicalTrainingMondayDayNumber(
+  date = new Date()
+) {
+  /*
+   * TrainingApp usa Monterrey.
+   *
+   * La semana cambia el domingo
+   * a las 22:00 hora local.
+   *
+   * Sumamos 2 horas al reloj local
+   * para convertir ese corte en
+   * lunes 00:00 lógico.
+   */
+  const formatter =
+    new Intl.DateTimeFormat(
+      "en-US",
+      {
+        timeZone:
+          "America/Monterrey",
+
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+
+        hourCycle: "h23",
+      }
+    );
+
+  const parts =
+    formatter.formatToParts(
+      date
+    );
+
+  const values:
+    Record<string, number> = {};
+
+  for (const part of parts) {
+    if (
+      part.type !== "literal"
+    ) {
+      values[part.type] =
+        Number(part.value);
+    }
+  }
+
+  const localAsUtc =
+    Date.UTC(
+      values.year,
+      values.month - 1,
+      values.day,
+      values.hour,
+      values.minute,
+      values.second
+    );
+
+  const shifted =
+    new Date(
+      localAsUtc +
+      2 * 60 * 60 * 1000
+    );
+
+  const shiftedDayNumber =
+    Math.floor(
+      Date.UTC(
+        shifted.getUTCFullYear(),
+        shifted.getUTCMonth(),
+        shifted.getUTCDate()
+      ) / 86400000
+    );
+
+  return getMondayForDayNumber(
+    shiftedDayNumber
+  );
+}
+
+
+function getTrainingWeekDateRange(
+  startDate:
+    | string
+    | null
+    | undefined,
+
+  weekNumber: number
+) {
+  const anchorMonday =
+    getPlanAnchorMondayDayNumber(
+      startDate
+    );
+
+  const safeWeekNumber =
+    Math.max(
+      1,
+      Math.floor(
+        Number(
+          weekNumber || 1
+        )
+      )
+    );
+
+  const startDayNumber =
+    anchorMonday +
+    (
+      safeWeekNumber - 1
+    ) * 7;
+
+  return {
+    weekStartDate:
+      formatTrainingDayNumber(
+        startDayNumber
+      ),
+
+    weekEndDate:
+      formatTrainingDayNumber(
+        startDayNumber + 6
+      ),
+
+    startDayNumber,
+  };
+}
+
+
+function getTrainingPlanCalendar(
+  startDate:
+    | string
+    | null
+    | undefined,
+
+  totalWeeks: number,
+
+  now = new Date()
+) {
+  const safeTotalWeeks =
+    Math.max(
+      1,
+      Number(
+        totalWeeks || 1
+      )
+    );
+
+  const anchorMonday =
+    getPlanAnchorMondayDayNumber(
+      startDate
+    );
+
+  const logicalMonday =
+    getLogicalTrainingMondayDayNumber(
+      now
+    );
+
+  const rawWeekNumber =
+    Math.floor(
+      (
+        logicalMonday -
+        anchorMonday
+      ) / 7
+    ) + 1;
+
+  const currentWeekNumber =
+    Math.min(
+      safeTotalWeeks,
+      Math.max(
+        1,
+        rawWeekNumber
+      )
+    );
+
+  const currentRange =
+    getTrainingWeekDateRange(
+      startDate,
+      currentWeekNumber
+    );
+
+  return {
+    currentWeekNumber,
+
+    currentWeekStartDate:
+      currentRange.weekStartDate,
+
+    currentWeekEndDate:
+      currentRange.weekEndDate,
+
+    timeZone:
+      "America/Monterrey",
+  };
+}
+
+
 // TRAININGAPP_ROLLING_PLAN_COVERAGE_V1
 //
 // Mantiene el plan vivo conforme avanza el calendario.
