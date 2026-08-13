@@ -3216,6 +3216,370 @@ async function registerPlanChangeUsage(db: D1Database, userId: string) {
 }
 
 
+
+async function refreshExistingPlanFromCurrentWeek(
+  db: D1Database,
+  userId: string,
+  input: AthleteProfileInput,
+  aiEnv?: Pick<
+    Bindings,
+    "OPENAI_API_KEY" | "OPENAI_MODEL" | "AI_ENABLED"
+  >
+) {
+  /*
+   * IMPORTANTE:
+   * se recupera el plan actual.
+   * NO se crea un training_plan nuevo.
+   */
+  const plan = await db
+    .prepare(
+      `select
+         id,
+         start_date,
+         end_date,
+         version,
+         created_at
+       from training_plans
+       where user_id = ?1
+       order by created_at desc
+       limit 1`
+    )
+    .bind(userId)
+    .first<any>();
+
+  if (!plan?.id) {
+    return {
+      updated: false,
+      reason: "no_existing_plan",
+      currentWeekNumber: 1,
+    };
+  }
+
+  /*
+   * Obtener semanas actualmente existentes.
+   */
+  const weeksResult = await db
+    .prepare(
+      `select
+         id,
+         week_number,
+         focus_label,
+         total_target_distance,
+         notes
+       from training_weeks
+       where training_plan_id = ?1
+       order by week_number asc`
+    )
+    .bind(plan.id)
+    .all<any>();
+
+  const existingWeeks = weeksResult.results || [];
+
+  if (!existingWeeks.length) {
+    return {
+      updated: false,
+      reason: "no_existing_weeks",
+      currentWeekNumber: 1,
+    };
+  }
+
+  /*
+   * Determinar la semana REAL según start_date.
+   *
+   * Esto es lo que impide volver a semana 1.
+   */
+  const calendar = getTrainingPlanCalendar(
+    plan.start_date,
+    existingWeeks.length
+  );
+
+  const currentWeekNumber =
+    Number(calendar.currentWeekNumber || 1);
+
+  /*
+   * Crear nueva estructura sólo EN MEMORIA.
+   */
+  const workoutLibrary =
+    await fetchWorkoutLibrary(db);
+
+  const paceBaseContext =
+    await fetchPaceEngineContext(
+      db,
+      userId,
+      input
+    );
+
+  const aiPaceAdjustment =
+    await getAiPaceAdjustment(
+      aiEnv,
+      input,
+      paceBaseContext
+    );
+
+  const paceContext: PaceEngineContext = {
+    ...paceBaseContext,
+
+    aiDeltaSeconds:
+      aiPaceAdjustment.delta_seconds,
+
+    aiReason:
+      aiPaceAdjustment.reason,
+
+    source:
+      paceBaseContext.recentMedianSecondsPerKm
+        ? (
+            aiPaceAdjustment.reason ===
+            "Ajuste por reglas internas"
+              ? "history_rules"
+              : "history_ai"
+          )
+        : (
+            aiPaceAdjustment.reason ===
+            "Ajuste por reglas internas"
+              ? "level_rules"
+              : "level_ai"
+          ),
+  };
+
+  let generatedWeeks =
+    buildPlanStructure(
+      input,
+      workoutLibrary
+    );
+
+  generatedWeeks =
+    applyPreferredDaysToWeeks(
+      input,
+      generatedWeeks
+    );
+
+  generatedWeeks =
+    enrichPlanWithPaces(
+      generatedWeeks,
+      paceContext
+    );
+
+  /*
+   * Procesamos únicamente semana actual y futuras.
+   *
+   * week 1 .. currentWeek-1:
+   * NO SE TOCAN.
+   */
+  const lastWeekNumber = Math.max(
+    existingWeeks.length,
+    generatedWeeks.length
+  );
+
+  for (
+    let weekNumber = currentWeekNumber;
+    weekNumber <= lastWeekNumber;
+    weekNumber++
+  ) {
+    const generatedWeek =
+      generatedWeeks.find(
+        (week: any) =>
+          Number(week.week_number) === weekNumber
+      );
+
+    /*
+     * Si la nueva estructura no tiene esa semana,
+     * dejamos la existente intacta.
+     */
+    if (!generatedWeek) {
+      continue;
+    }
+
+    let existingWeek =
+      existingWeeks.find(
+        (week: any) =>
+          Number(week.week_number) === weekNumber
+      );
+
+    /*
+     * Si es una semana futura que todavía no existe,
+     * la creamos dentro DEL MISMO PLAN.
+     */
+    if (!existingWeek) {
+      const weekId = crypto.randomUUID();
+
+      await db
+        .prepare(
+          `insert into training_weeks (
+             id,
+             training_plan_id,
+             week_number,
+             focus_label,
+             total_target_distance,
+             notes
+           ) values (
+             ?1, ?2, ?3, ?4, ?5, ?6
+           )`
+        )
+        .bind(
+          weekId,
+          plan.id,
+          weekNumber,
+          generatedWeek.focus_label,
+          generatedWeek.total_target_distance,
+          generatedWeek.notes
+        )
+        .run();
+
+      existingWeek = {
+        id: weekId,
+        week_number: weekNumber,
+      };
+    } else {
+      await db
+        .prepare(
+          `update training_weeks
+           set focus_label = ?1,
+               total_target_distance = ?2,
+               notes = ?3
+           where id = ?4`
+        )
+        .bind(
+          generatedWeek.focus_label,
+          generatedWeek.total_target_distance,
+          generatedWeek.notes,
+          existingWeek.id
+        )
+        .run();
+    }
+
+    /*
+     * Conservar registros de progreso.
+     *
+     * Sólo quitamos la referencia al training_session
+     * que vamos a sustituir.
+     */
+    try {
+      await db
+        .prepare(
+          `update training_session_progress
+           set training_session_id = null,
+               updated_at = ?1
+           where user_id = ?2
+             and week_number = ?3`
+        )
+        .bind(
+          new Date().toISOString(),
+          userId,
+          weekNumber
+        )
+        .run();
+    } catch (error) {
+      console.warn(
+        "No fue posible separar session progress:",
+        error
+      );
+    }
+
+    /*
+     * Borrar solamente sesiones de la semana
+     * actual/futura.
+     */
+    await db
+      .prepare(
+        `delete from training_sessions
+         where training_week_id = ?1`
+      )
+      .bind(existingWeek.id)
+      .run();
+
+    /*
+     * Insertar nuevas sesiones según:
+     *
+     * - nuevo objetivo
+     * - nivel
+     * - volumen
+     * - días seleccionados
+     * - ritmos calculados
+     */
+    for (const session of generatedWeek.sessions || []) {
+      await db
+        .prepare(
+          `insert into training_sessions (
+             id,
+             training_week_id,
+             day_of_week,
+             session_type,
+             title,
+             objective,
+             distance_target,
+             duration_target,
+             intensity_zone,
+             warmup_text,
+             main_set_text,
+             cooldown_text,
+             estimated_load,
+             status
+           ) values (
+             ?1, ?2, ?3, ?4, ?5, ?6,
+             ?7, ?8, ?9, ?10, ?11,
+             ?12, ?13, ?14
+           )`
+        )
+        .bind(
+          crypto.randomUUID(),
+          existingWeek.id,
+          session.day_of_week,
+          session.session_type,
+          session.title,
+          session.objective,
+          session.distance_target,
+          session.duration_target,
+          session.intensity_zone,
+          session.warmup_text,
+          session.main_set_text,
+          session.cooldown_text,
+          session.estimated_load,
+          session.status
+        )
+        .run();
+    }
+  }
+
+  /*
+   * Actualizar metadata DEL MISMO PLAN.
+   *
+   * NO modificamos:
+   *
+   * plan.id
+   * plan.start_date
+   * plan.created_at
+   * plan.version
+   */
+  const distanceKm =
+    normalizeDistance(input.distance);
+
+  await db
+    .prepare(
+      `update training_plans
+       set end_date = ?1,
+           plan_summary = ?2,
+           generation_source = ?3
+       where id = ?4`
+    )
+    .bind(
+      input.eventDate?.trim() || null,
+      isRecoverFitnessGoal(input.goal)
+        ? `Plan actualizado para recuperar condición - ${input.level.trim()} - ${input.daysPerWeek} días/semana`
+        : `Plan actualizado ${distanceLabel(distanceKm)} - ${input.goal.trim()} - ${input.daysPerWeek} días/semana`,
+      "profile_refresh_current_week",
+      plan.id
+    )
+    .run();
+
+  return {
+    updated: true,
+    planId: plan.id,
+    currentWeekNumber,
+    weeksUpdatedFrom: currentWeekNumber,
+  };
+}
+
+
 async function createTrainingPlanForUser(
   db: D1Database,
   userId: string,
@@ -3392,6 +3756,7 @@ async function ensurePlanForUser(
       `select
          experience_level,
          weekly_days_available,
+         preferred_training_days,
          current_weekly_volume,
          preferred_goal_type,
          notes
@@ -3403,6 +3768,7 @@ async function ensurePlanForUser(
     .first<{
       experience_level: string;
       weekly_days_available: number;
+      preferred_training_days: string | null;
       current_weekly_volume: number;
       preferred_goal_type: string;
       notes: string | null;
@@ -3442,6 +3808,7 @@ async function ensurePlanForUser(
     goal: goal.goal_type || profile.preferred_goal_type,
     distance: goal.target_distance,
     daysPerWeek: Number(profile.weekly_days_available || 4),
+    preferredTrainingDays: profile.preferred_training_days || undefined,
     level: profile.experience_level,
     currentVolumeKm: Number(profile.current_weekly_volume || 0),
     eventName: goal.target_event_name || "",
@@ -4763,14 +5130,19 @@ app.post("/api/onboarding", async (c) => {
             `update athlete_profiles
              set experience_level = ?1,
                  weekly_days_available = ?2,
-                 current_weekly_volume = ?3,
-                 preferred_goal_type = ?4,
-                 notes = ?5
-             where user_id = ?6`
+                 preferred_training_days = ?3,
+                 current_weekly_volume = ?4,
+                 preferred_goal_type = ?5,
+                 notes = ?6
+             where user_id = ?7`
           )
           .bind(
             body.level.trim(),
             body.daysPerWeek,
+            normalizePreferredTrainingDays(
+              body.preferredTrainingDays,
+              body.daysPerWeek
+            ).join(","),
             body.currentVolumeKm,
             body.goal.trim(),
             body.notes?.trim() || "",
@@ -4845,8 +5217,9 @@ app.post("/api/onboarding", async (c) => {
         .prepare(
           `insert into athlete_profiles (
             id, user_id, experience_level, weekly_days_available,
-            current_weekly_volume, preferred_goal_type, notes, created_at
-          ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)`
+            current_weekly_volume, preferred_training_days,
+            preferred_goal_type, notes, created_at
+          ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)`
         )
         .bind(
           profileId,
@@ -4854,6 +5227,10 @@ app.post("/api/onboarding", async (c) => {
           body.level.trim(),
           body.daysPerWeek,
           body.currentVolumeKm,
+          normalizePreferredTrainingDays(
+            body.preferredTrainingDays,
+            body.daysPerWeek
+          ).join(","),
           body.goal.trim(),
           body.notes?.trim() || "",
           createdAt
@@ -4993,6 +5370,126 @@ app.post("/api/membership/status", async (c) => {
     );
   }
 });
+
+
+app.post("/api/plan/refresh-profile", async (c) => {
+  try {
+    /*
+     * Requerimos sesión del usuario.
+     */
+    const auth =
+      await requireAuthenticatedUser(c);
+
+    if (!auth) {
+      return jsonError(
+        c,
+        "No autenticado",
+        401
+      );
+    }
+
+    const body = (await c.req.json()) as AthleteProfileInput;
+
+    validateProfile(body);
+
+    /*
+     * No confiamos en userId enviado por frontend.
+     * Usamos siempre el usuario autenticado.
+     */
+    const userId = auth.user.id;
+
+    const membership =
+      await getLatestMembership(
+        c.env.DB,
+        userId
+      );
+
+    if (
+      !membership ||
+      membership.status !== "active"
+    ) {
+      return jsonError(
+        c,
+        "Se requiere una membresía activa",
+        403
+      );
+    }
+
+    /*
+     * Normalizar los días seleccionados.
+     */
+    const preferredTrainingDays =
+      normalizePreferredTrainingDays(
+        body.preferredTrainingDays,
+        body.daysPerWeek
+      );
+
+    const input: AthleteProfileInput = {
+      ...body,
+
+      daysPerWeek:
+        preferredTrainingDays.length,
+
+      preferredTrainingDays,
+    };
+
+    /*
+     * Comprobar que la distancia es válida
+     * para la membresía actual.
+     */
+    const allowed =
+      await validateDistanceForMembership(
+        c.env.DB,
+        userId,
+        input.distance
+      );
+
+    if (!allowed.ok) {
+      return c.json(
+        {
+          ok: false,
+          error: allowed.message,
+          planCode: allowed.planCode,
+          allowedDistances:
+            allowed.allowedDistances,
+        },
+        403
+      );
+    }
+
+    /*
+     * AQUÍ está la diferencia importante:
+     *
+     * NO usamos createTrainingPlanForUser().
+     */
+    const result =
+      await refreshExistingPlanFromCurrentWeek(
+        c.env.DB,
+        userId,
+        input,
+        c.env
+      );
+
+    return c.json({
+      ok: true,
+      preferredTrainingDays,
+      ...result,
+    });
+
+  } catch (error) {
+    return c.json(
+      {
+        ok: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : "No fue posible actualizar el plan",
+      },
+      500
+    );
+  }
+});
+
 
 app.post("/api/plan/generate", async (c) => {
   try {
@@ -5183,6 +5680,7 @@ app.get("/api/plan/:userId", async (c) => {
         `select
            experience_level,
            weekly_days_available,
+           preferred_training_days,
            current_weekly_volume,
            preferred_goal_type,
            notes
@@ -5696,6 +6194,7 @@ async function buildAiPlanReviewPayload(
       `select
          experience_level,
          weekly_days_available,
+         preferred_training_days,
          current_weekly_volume,
          preferred_goal_type,
          notes

@@ -507,6 +507,53 @@ function getTrainingSessionCalendarDate(
 }
 
 
+const RUNNER_DAY_ORDER = [
+  "Lunes",
+  "Martes",
+  "Miércoles",
+  "Jueves",
+  "Viernes",
+  "Sábado",
+  "Domingo",
+];
+
+function normalizeRunnerTrainingDays(
+  value: unknown,
+  daysPerWeek: number
+) {
+  const target = Math.max(
+    3,
+    Math.min(6, Number(daysPerWeek || 4))
+  );
+
+  const defaults: Record<number, string[]> = {
+    3: ["Martes", "Jueves", "Domingo"],
+    4: ["Martes", "Jueves", "Sábado", "Domingo"],
+    5: ["Martes", "Miércoles", "Jueves", "Sábado", "Domingo"],
+    6: ["Lunes", "Martes", "Miércoles", "Jueves", "Sábado", "Domingo"],
+  };
+
+  const rawDays = Array.isArray(value)
+    ? value
+    : typeof value === "string"
+    ? value.split(",")
+    : [];
+
+  const selected = rawDays
+    .map((day) => String(day || "").trim())
+    .filter((day) => RUNNER_DAY_ORDER.includes(day))
+    .filter((day, index, arr) => arr.indexOf(day) === index);
+
+  if (!selected.length) {
+    return defaults[target] || defaults[4];
+  }
+
+  return RUNNER_DAY_ORDER.filter((day) =>
+    selected.includes(day)
+  ).slice(0, 6);
+}
+
+
 function getCurrentPlanWeekNumber(plan: TrainingPlan | null, weeks: Week[]) {
   if (!weeks.length) return null;
 
@@ -1268,6 +1315,14 @@ async function fetchPlanSilently() {
             daysPerWeek: Number(
               data.runnerProfile?.weekly_days_available || prev.daysPerWeek
             ),
+            preferredTrainingDays: normalizeRunnerTrainingDays(
+              data.runnerProfile?.preferred_training_days ??
+                prev.preferredTrainingDays,
+              Number(
+                data.runnerProfile?.weekly_days_available ||
+                  prev.daysPerWeek
+              )
+            ),
             level: data.runnerProfile?.experience_level || prev.level,
             currentVolumeKm: Number(
               data.runnerProfile?.current_weekly_volume ?? prev.currentVolumeKm
@@ -1475,42 +1530,121 @@ async function fetchPlanSilently() {
 
   async function handleOnboarding(e: FormEvent) {
     e.preventDefault();
+
     if (!authUser) return;
 
     setLoading(true);
     setResult("");
 
     try {
+      const preferredTrainingDays =
+        normalizeRunnerTrainingDays(
+          form.preferredTrainingDays,
+          form.daysPerWeek
+        );
+
       const payload = {
         ...form,
+        daysPerWeek: preferredTrainingDays.length,
+        preferredTrainingDays,
         name: authUser.name,
         email: authUser.email,
         userId: authUser.id,
       };
 
-      const res = await fetch(`${API_URL}/api/onboarding`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(payload),
-      });
+      /*
+       * Guardar perfil y objetivo.
+       *
+       * Este endpoint NO genera un plan.
+       */
+      const res = await fetch(
+        `${API_URL}/api/onboarding`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(payload),
+        }
+      );
 
       const data = await res.json();
 
       if (!res.ok) {
-        throw new Error(data?.error || "No fue posible guardar onboarding");
+        throw new Error(
+          data?.error ||
+            "No fue posible guardar el perfil"
+        );
       }
 
-      if (hasActiveMembership) {
-        await generatePlan();
+      /*
+       * Si ya tiene un plan:
+       * actualizar EL MISMO PLAN desde
+       * la semana actual.
+       */
+      if (
+        hasActiveMembership &&
+        trainingPlan?.id
+      ) {
+        const refreshRes = await fetch(
+          `${API_URL}/api/plan/refresh-profile`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${authToken}`,
+            },
+            body: JSON.stringify(payload),
+          }
+        );
+
+        const refreshData =
+          await refreshRes.json();
+
+        if (!refreshRes.ok) {
+          throw new Error(
+            refreshData?.error ||
+              "El perfil se guardó, pero no fue posible actualizar el plan."
+          );
+        }
+
+        await fetchPlanSilently();
+
+
         setActiveTab("plan");
-      } else {
-        setActiveTab("membership");
-        setResult("Perfil guardado. Activa una membresía para generar tu plan.");
+
+        setResult(
+          `Objetivo actualizado. Tu plan continúa en la semana ${
+            refreshData.currentWeekNumber || ""
+          } y las semanas anteriores se conservaron.`
+        );
+
+        return;
       }
+
+      /*
+       * Membresía activa pero todavía sin plan.
+       * Guardar objetivo NO genera uno automáticamente.
+       */
+      if (hasActiveMembership) {
+        setResult(
+          "Perfil guardado. Ahora puedes generar tu primer plan."
+        );
+        return;
+      }
+
+      setActiveTab("membership");
+
+      setResult(
+        "Perfil guardado. Activa una membresía para generar tu plan."
+      );
+
     } catch (error) {
-      setResult(error instanceof Error ? error.message : "Error inesperado");
+      setResult(
+        error instanceof Error
+          ? error.message
+          : "Error inesperado"
+      );
     } finally {
       setLoading(false);
     }
@@ -2496,19 +2630,99 @@ async function fetchPlanSilently() {
                 </div>
 
                 <div className="two-col">
-                  <Field label="Días por semana">
-                    <input
-                      type="number"
-                      min={3}
-                      max={6}
-                      value={form.daysPerWeek}
-                      onChange={(e) =>
-                        setForm((prev) => ({
-                          ...prev,
-                          daysPerWeek: Number(e.target.value),
-                        }))
-                      }
-                    />
+                  <Field label="Días disponibles para entrenar">
+                    <div
+                      style={{
+                        display: "flex",
+                        flexWrap: "wrap",
+                        gap: 8,
+                        marginTop: 4,
+                      }}
+                    >
+                      {RUNNER_DAY_ORDER.map((day) => {
+                        const selected =
+                          form.preferredTrainingDays.includes(day);
+
+                        return (
+                          <button
+                            key={day}
+                            type="button"
+                            className={
+                              selected
+                                ? "primary-button"
+                                : "ghost-button"
+                            }
+                            style={{
+                              minWidth: "auto",
+                              padding: "10px 13px",
+                              flex: "0 0 auto",
+                            }}
+                            onClick={() => {
+                              setForm((prev) => {
+                                const current =
+                                  prev.preferredTrainingDays;
+
+                                /*
+                                 * Quitar.
+                                 * Mínimo 3 días.
+                                 */
+                                if (current.includes(day)) {
+                                  if (current.length <= 3) {
+                                    return prev;
+                                  }
+
+                                  const next =
+                                    current.filter(
+                                      (item) => item !== day
+                                    );
+
+                                  return {
+                                    ...prev,
+                                    preferredTrainingDays: next,
+                                    daysPerWeek: next.length,
+                                  };
+                                }
+
+                                /*
+                                 * Agregar.
+                                 * Máximo 6 días.
+                                 */
+                                if (current.length >= 6) {
+                                  return prev;
+                                }
+
+                                const next =
+                                  RUNNER_DAY_ORDER.filter(
+                                    (item) =>
+                                      current.includes(item) ||
+                                      item === day
+                                  );
+
+                                return {
+                                  ...prev,
+                                  preferredTrainingDays: next,
+                                  daysPerWeek: next.length,
+                                };
+                              });
+                            }}
+                          >
+                            {day}
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    <div
+                      style={{
+                        marginTop: 10,
+                        fontSize: 13,
+                        opacity: 0.72,
+                      }}
+                    >
+                      {form.preferredTrainingDays.length} días seleccionados
+                      {" · "}
+                      mínimo 3, máximo 6
+                    </div>
                   </Field>
 
                   <Field label="Días de entrenamiento">
@@ -2673,7 +2887,7 @@ async function fetchPlanSilently() {
                     {loading ? "Guardando..." : "Guardar objetivo"}
                   </button>
 
-                  {hasActiveMembership && (
+                  {hasActiveMembership && !trainingPlan && (
                     <button
                       type="button"
                       className="ghost-button"
