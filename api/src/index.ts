@@ -7312,19 +7312,40 @@ app.get("/api/session-progress/me", async (c) => {
   }
 });
 
+
+// TRAININGAPP_SESSION_PROGRESS_V4
+
+app.get("/api/version", (c) => {
+  return c.json({
+    ok: true,
+    api: "trainingapp-api",
+    sessionProgressHandler: "v4-insert-ignore-update",
+  });
+});
+
 app.post("/api/session-progress", async (c) => {
   try {
     const auth = await requireAuthenticatedUser(c);
+
     if (!auth) {
       return jsonError(c, "No autenticado", 401);
     }
+
     const userId = auth.user.id;
     const body = await c.req.json();
-
     const now = new Date().toISOString();
 
-    const weekNumber = Number(body.weekNumber || body.week_number || 0);
-    const sessionIndex = Number(body.sessionIndex ?? body.session_index ?? 0);
+    const weekNumber = Number(
+      body.weekNumber ??
+      body.week_number ??
+      0
+    );
+
+    const sessionIndex = Number(
+      body.sessionIndex ??
+      body.session_index ??
+      0
+    );
 
     if (!weekNumber || Number.isNaN(weekNumber)) {
       return c.json(
@@ -7336,7 +7357,10 @@ app.post("/api/session-progress", async (c) => {
       );
     }
 
-    if (Number.isNaN(sessionIndex)) {
+    if (
+      sessionIndex < 0 ||
+      Number.isNaN(sessionIndex)
+    ) {
       return c.json(
         {
           ok: false,
@@ -7346,147 +7370,125 @@ app.post("/api/session-progress", async (c) => {
       );
     }
 
-    const requestTrainingPlanId =
-      body.trainingPlanId || body.training_plan_id || null;
-    const requestTrainingWeekId =
-      body.trainingWeekId || body.training_week_id || null;
-    const requestTrainingSessionId =
-      body.trainingSessionId || body.training_session_id || null;
+    const rawCompleted =
+      body.isCompleted ??
+      body.is_completed ??
+      false;
 
-    let existing: { id: string } | null = null;
-
-    if (requestTrainingSessionId) {
-      existing = await c.env.DB
-        .prepare(
-          `select id
-           from training_session_progress
-           where user_id = ?1
-             and training_session_id = ?2
-           limit 1`
-        )
-        .bind(userId, requestTrainingSessionId)
-        .first<{ id: string }>();
-    } else if (requestTrainingPlanId) {
-      existing = await c.env.DB
-        .prepare(
-          `select id
-           from training_session_progress
-           where user_id = ?1
-             and training_plan_id = ?2
-             and week_number = ?3
-             and session_index = ?4
-           limit 1`
-        )
-        .bind(
-          userId,
-          requestTrainingPlanId,
-          weekNumber,
-          sessionIndex
-        )
-        .first<{ id: string }>();
-    }
-
-    const isCompleted = body.isCompleted ?? body.is_completed ? 1 : 0;
+    const isCompleted =
+      rawCompleted === true ||
+      rawCompleted === 1 ||
+      rawCompleted === "1"
+        ? 1
+        : 0;
 
     const completedAt =
       isCompleted === 1
-        ? body.completedAt || body.completed_at || now
+        ? (
+            body.completedAt ??
+            body.completed_at ??
+            now
+          )
         : null;
 
+    const numberOrNull = (value: any) => {
+      if (
+        value === "" ||
+        value === null ||
+        value === undefined
+      ) {
+        return null;
+      }
+
+      const parsed = Number(value);
+
+      return Number.isFinite(parsed)
+        ? parsed
+        : null;
+    };
+
     const actualDistanceKm =
-      body.actualDistanceKm === "" || body.actualDistanceKm === undefined
-        ? null
-        : Number(body.actualDistanceKm);
+      numberOrNull(
+        body.actualDistanceKm ??
+        body.actual_distance_km
+      );
 
     const actualDurationMinutes =
-      body.actualDurationMinutes === "" ||
-      body.actualDurationMinutes === undefined
-        ? null
-        : Number(body.actualDurationMinutes);
+      numberOrNull(
+        body.actualDurationMinutes ??
+        body.actual_duration_minutes
+      );
 
     let actualPaceSecondsPerKm =
-      body.actualPaceSecondsPerKm === "" ||
-      body.actualPaceSecondsPerKm === undefined
-        ? null
-        : Number(body.actualPaceSecondsPerKm);
+      numberOrNull(
+        body.actualPaceSecondsPerKm ??
+        body.actual_pace_seconds_per_km
+      );
 
-    // El ritmo manual solo existe si el atleta lo registró explícitamente.
-    // No calcularlo con distancia/duración objetivo.
     if (
-      actualPaceSecondsPerKm !== null &&
-      (!Number.isFinite(actualPaceSecondsPerKm) ||
-        actualPaceSecondsPerKm <= 0)
+      !actualPaceSecondsPerKm &&
+      actualDistanceKm &&
+      actualDurationMinutes &&
+      actualDistanceKm > 0
     ) {
-      actualPaceSecondsPerKm = null;
+      actualPaceSecondsPerKm =
+        Math.round(
+          (actualDurationMinutes * 60) /
+          actualDistanceKm
+        );
     }
 
     const effortScore =
-      body.effortScore === "" || body.effortScore === undefined
-        ? null
-        : Number(body.effortScore);
+      numberOrNull(
+        body.effortScore ??
+        body.effort_score
+      );
 
-    const payload = {
-      trainingPlanId: requestTrainingPlanId,
-      trainingWeekId: requestTrainingWeekId,
-      trainingSessionId: requestTrainingSessionId,
-      sessionTitle: body.sessionTitle || body.session_title || null,
-      notes: body.notes || null,
-      source: body.source || "manual",
-    };
+    const trainingPlanId =
+      body.trainingPlanId ??
+      body.training_plan_id ??
+      null;
 
-    if (existing?.id) {
-      await c.env.DB
-        .prepare(
-          `update training_session_progress
-           set training_plan_id = ?1,
-               training_week_id = ?2,
-               training_session_id = ?3,
-               session_title = ?4,
-               is_completed = ?5,
-               completed_at = ?6,
-               actual_distance_km = ?7,
-               actual_duration_minutes = ?8,
-               actual_pace_seconds_per_km = ?9,
-               effort_score = ?10,
-               notes = ?11,
-               source = ?12,
-               updated_at = ?13
-           where id = ?14
-             and user_id = ?15`
-        )
-        .bind(
-          payload.trainingPlanId,
-          payload.trainingWeekId,
-          payload.trainingSessionId,
-          payload.sessionTitle,
-          isCompleted,
-          completedAt,
-          Number.isNaN(actualDistanceKm) ? null : actualDistanceKm,
-          Number.isNaN(actualDurationMinutes) ? null : actualDurationMinutes,
-          Number.isNaN(actualPaceSecondsPerKm)
-            ? null
-            : actualPaceSecondsPerKm,
-          Number.isNaN(effortScore) ? null : effortScore,
-          payload.notes,
-          payload.source,
-          now,
-          existing.id,
-          userId
-        )
-        .run();
+    const trainingWeekId =
+      body.trainingWeekId ??
+      body.training_week_id ??
+      null;
 
-      return c.json({
-        ok: true,
-        id: existing.id,
-        updated: true,
-      });
-    }
+    const trainingSessionId =
+      body.trainingSessionId ??
+      body.training_session_id ??
+      null;
 
-    const id = crypto.randomUUID();
+    const sessionTitle =
+      body.sessionTitle ??
+      body.session_title ??
+      null;
 
+    const notes =
+      body.notes ?? null;
+
+    const source =
+      body.source ?? "manual";
+
+    /*
+     * PASO 1
+     *
+     * Insertar solamente si todavía NO existe.
+     *
+     * OR IGNORE evita por diseño:
+     *
+     * UNIQUE(
+     *   user_id,
+     *   week_number,
+     *   session_index
+     * )
+     *
+     * Incluso con dos requests simultáneos,
+     * uno inserta y el otro simplemente ignora.
+     */
     await c.env.DB
       .prepare(
-        `insert into training_session_progress (
+        `insert or ignore into training_session_progress (
           id,
           user_id,
           training_plan_id,
@@ -7506,51 +7508,142 @@ app.post("/api/session-progress", async (c) => {
           created_at,
           updated_at
         ) values (
-          ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
-          ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18
+          ?1, ?2, ?3, ?4, ?5, ?6,
+          ?7, ?8, ?9, ?10, ?11, ?12,
+          ?13, ?14, ?15, ?16, ?17, ?18
         )`
       )
       .bind(
-        id,
+        crypto.randomUUID(),
         userId,
-        payload.trainingPlanId,
-        payload.trainingWeekId,
-        payload.trainingSessionId,
+        trainingPlanId,
+        trainingWeekId,
+        trainingSessionId,
         weekNumber,
         sessionIndex,
-        payload.sessionTitle,
+        sessionTitle,
         isCompleted,
         completedAt,
-        Number.isNaN(actualDistanceKm) ? null : actualDistanceKm,
-        Number.isNaN(actualDurationMinutes) ? null : actualDurationMinutes,
-        Number.isNaN(actualPaceSecondsPerKm) ? null : actualPaceSecondsPerKm,
-        Number.isNaN(effortScore) ? null : effortScore,
-        payload.notes,
-        payload.source,
+        actualDistanceKm,
+        actualDurationMinutes,
+        actualPaceSecondsPerKm,
+        effortScore,
+        notes,
+        source,
         now,
         now
       )
       .run();
 
+    /*
+     * PASO 2
+     *
+     * Sea nuevo o existente, actualizar
+     * EL MISMO registro.
+     */
+    await c.env.DB
+      .prepare(
+        `update training_session_progress
+         set training_plan_id = ?1,
+             training_week_id = ?2,
+             training_session_id = ?3,
+             session_title = ?4,
+             is_completed = ?5,
+             completed_at = ?6,
+             actual_distance_km = ?7,
+             actual_duration_minutes = ?8,
+             actual_pace_seconds_per_km = ?9,
+             effort_score = ?10,
+             notes = ?11,
+             source = ?12,
+             updated_at = ?13
+         where user_id = ?14
+           and week_number = ?15
+           and session_index = ?16`
+      )
+      .bind(
+        trainingPlanId,
+        trainingWeekId,
+        trainingSessionId,
+        sessionTitle,
+        isCompleted,
+        completedAt,
+        actualDistanceKm,
+        actualDurationMinutes,
+        actualPaceSecondsPerKm,
+        effortScore,
+        notes,
+        source,
+        now,
+        userId,
+        weekNumber,
+        sessionIndex
+      )
+      .run();
+
+    const saved = await c.env.DB
+      .prepare(
+        `select
+           id,
+           is_completed,
+           completed_at,
+           updated_at
+         from training_session_progress
+         where user_id = ?1
+           and week_number = ?2
+           and session_index = ?3
+         limit 1`
+      )
+      .bind(
+        userId,
+        weekNumber,
+        sessionIndex
+      )
+      .first<any>();
+
+    if (!saved?.id) {
+      throw new Error(
+        "No fue posible localizar el progreso después de guardarlo."
+      );
+    }
+
+    c.header(
+      "X-TrainingApp-Handler",
+      "session-progress-v4"
+    );
+
     return c.json({
       ok: true,
-      id,
-      created: true,
+      handlerVersion:
+        "session-progress-v4",
+      id: saved.id,
+      updated: true,
+      isCompleted:
+        Number(saved.is_completed) === 1,
+      completedAt:
+        saved.completed_at ?? null,
     });
+
   } catch (error) {
+    console.error(
+      "session-progress-v4:",
+      error
+    );
+
     return c.json(
       {
         ok: false,
+        handlerVersion:
+          "session-progress-v4",
         error:
           error instanceof Error
             ? error.message
-            : "No fue posible guardar progreso de entrenamiento",
+            : "No fue posible guardar progreso",
       },
       500
     );
   }
 });
-
 
 
 // TRAININGAPP_ADAPTIVE_STATUS_ENDPOINT_V1
