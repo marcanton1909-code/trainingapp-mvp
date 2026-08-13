@@ -3717,6 +3717,517 @@ async function createTrainingPlanForUser(
   };
 }
 
+
+// TRAININGAPP_ROLLING_PLAN_COVERAGE_V1
+//
+// Mantiene el plan vivo conforme avanza el calendario.
+//
+// No crea un training_plan nuevo.
+// No modifica semanas históricas.
+// No cambia start_date.
+// Sólo agrega semanas faltantes al plan existente.
+//
+async function ensureRollingTrainingPlanCoverage(
+  db: D1Database,
+  userId: string,
+  plan: {
+    id: string;
+    start_date: string | null;
+  }
+) {
+  if (!plan?.id || !plan.start_date) {
+    return {
+      extended: false,
+      reason: "missing_plan_start_date",
+    };
+  }
+
+  /*
+   * Semana REAL según calendario.
+   *
+   * A diferencia de getTrainingPlanCalendar(),
+   * aquí NO se limita por las semanas existentes.
+   */
+  const anchorMonday =
+    getPlanAnchorMondayDayNumber(
+      plan.start_date
+    );
+
+  const logicalMonday =
+    getLogicalTrainingMondayDayNumber(
+      new Date()
+    );
+
+  const rawCurrentWeek =
+    Math.max(
+      1,
+      Math.floor(
+        (logicalMonday - anchorMonday) / 7
+      ) + 1
+    );
+
+  /*
+   * Mantener además preparada la siguiente
+   * semana para que el cambio dominical
+   * sea inmediato.
+   */
+  const desiredMaxWeek =
+    rawCurrentWeek + 1;
+
+  const existingInfo = await db
+    .prepare(
+      `select
+         coalesce(max(week_number), 0) as max_week
+       from training_weeks
+       where training_plan_id = ?1`
+    )
+    .bind(plan.id)
+    .first<any>();
+
+  const existingMaxWeek =
+    Number(existingInfo?.max_week || 0);
+
+  if (
+    existingMaxWeek >= desiredMaxWeek
+  ) {
+    return {
+      extended: false,
+      currentWeekNumber: rawCurrentWeek,
+      maxWeekNumber: existingMaxWeek,
+      reason: "coverage_ok",
+    };
+  }
+
+  const user = await db
+    .prepare(
+      `select id, name, email
+       from users
+       where id = ?1
+       limit 1`
+    )
+    .bind(userId)
+    .first<any>();
+
+  const profile = await db
+    .prepare(
+      `select
+         experience_level,
+         weekly_days_available,
+         preferred_training_days,
+         current_weekly_volume,
+         preferred_goal_type,
+         notes
+       from athlete_profiles
+       where user_id = ?1
+       limit 1`
+    )
+    .bind(userId)
+    .first<any>();
+
+  const goal = await db
+    .prepare(
+      `select
+         goal_type,
+         target_distance,
+         target_event_name,
+         target_event_date
+       from goals
+       where user_id = ?1
+       order by created_at desc
+       limit 1`
+    )
+    .bind(userId)
+    .first<any>();
+
+  if (!user || !profile || !goal) {
+    return {
+      extended: false,
+      currentWeekNumber: rawCurrentWeek,
+      maxWeekNumber: existingMaxWeek,
+      reason: "missing_profile",
+    };
+  }
+
+  const daysPerWeek =
+    Number(
+      profile.weekly_days_available || 4
+    );
+
+  const input: AthleteProfileInput = {
+    name: user.name,
+    email: user.email,
+
+    goal:
+      goal.goal_type ||
+      profile.preferred_goal_type,
+
+    distance:
+      goal.target_distance,
+
+    daysPerWeek,
+
+    preferredTrainingDays:
+      profile.preferred_training_days ||
+      undefined,
+
+    level:
+      profile.experience_level,
+
+    currentVolumeKm:
+      Number(
+        profile.current_weekly_volume || 0
+      ),
+
+    eventName:
+      goal.target_event_name || "",
+
+    eventDate:
+      goal.target_event_date || "",
+
+    notes:
+      profile.notes || "",
+  };
+
+  const workoutLibrary =
+    await fetchWorkoutLibrary(db);
+
+  const paceBaseContext =
+    await fetchPaceEngineContext(
+      db,
+      userId,
+      input
+    );
+
+  const paceContext: PaceEngineContext = {
+    ...paceBaseContext,
+
+    aiDeltaSeconds: 0,
+
+    aiReason:
+      "Continuidad automática del plan",
+
+    source:
+      paceBaseContext
+        .recentMedianSecondsPerKm
+        ? "history_rules"
+        : "level_rules",
+  };
+
+  const statements: D1PreparedStatement[] =
+    [];
+
+  let createdWeeks = 0;
+
+  for (
+    let weekNumber =
+      existingMaxWeek + 1;
+
+    weekNumber <= desiredMaxWeek;
+
+    weekNumber++
+  ) {
+
+    /*
+     * Siempre dejamos margen por delante
+     * para que una semana de continuidad
+     * NO se convierta artificialmente
+     * en "semana de carrera".
+     */
+    const planningHorizon =
+      weekNumber + 4;
+
+    const isRecoveryConditionPlan =
+      isRecoverFitnessGoal(
+        input.goal
+      );
+
+    const distanceKm =
+      isRecoveryConditionPlan
+        ? 0
+        : normalizeDistance(
+            input.distance
+          );
+
+    const recovery =
+      weekNumber % 4 === 0;
+
+    const phase =
+      getWeekPhase(
+        weekNumber,
+        planningHorizon
+      );
+
+    let sessions =
+      buildSessionsForWeek(
+        input,
+        weekNumber,
+        planningHorizon,
+        workoutLibrary
+      );
+
+    let generatedWeek: any = {
+      week_number:
+        weekNumber,
+
+      focus_label:
+        isRecoveryConditionPlan
+          ? recovery
+            ? "Descarga activa para recuperar condición"
+            : "Continuidad para recuperar condición"
+          : recovery
+          ? `Descarga activa ${distanceLabel(
+              distanceKm
+            )}`
+          : `${phase} ${distanceLabel(
+              distanceKm
+            )}`,
+
+      total_target_distance:
+        roundToHalf(
+          sessions.reduce(
+            (
+              sum: number,
+              session: any
+            ) =>
+              sum +
+              Number(
+                session.distance_target ||
+                  0
+              ),
+            0
+          )
+        ),
+
+      notes:
+        recovery
+          ? "Semana de descarga para controlar fatiga y mantener continuidad."
+          : "Semana de continuidad generada automáticamente según el progreso del atleta.",
+
+      sessions,
+    };
+
+    /*
+     * Aplicar exactamente los días
+     * seleccionados por el corredor.
+     */
+    generatedWeek =
+      applyPreferredDaysToWeeks(
+        input,
+        [generatedWeek]
+      )[0];
+
+    /*
+     * Agregar prescripción de ritmo
+     * usando historial real.
+     */
+    generatedWeek.sessions =
+      (
+        generatedWeek.sessions || []
+      ).map(
+        (session: SessionSeed) => {
+
+          const prescription =
+            getSessionPacePrescription(
+              session,
+              weekNumber,
+              planningHorizon,
+              paceContext
+            );
+
+          const cleanMainSet =
+            stripInternalWorkoutReferences(
+              session.main_set_text
+            );
+
+          const paceText =
+            `Ritmo recomendado: ` +
+            `${formatPace(
+              prescription.minSeconds
+            )}–${formatPace(
+              prescription.maxSeconds
+            )} min/km.`;
+
+          const effortText =
+            `Esfuerzo: RPE ` +
+            `${prescription.rpe} · ` +
+            `Dificultad: ` +
+            `${prescription.difficulty}.`;
+
+          const feelingText =
+            `Sensación esperada: ` +
+            `${prescription.feeling}`;
+
+          return {
+            ...session,
+
+            main_set_text: [
+              cleanMainSet,
+              paceText,
+              effortText,
+              feelingText,
+            ]
+              .filter(Boolean)
+              .join(" "),
+          };
+        }
+      );
+
+    const candidateWeekId =
+      crypto.randomUUID();
+
+    /*
+     * Insertar la semana.
+     *
+     * OR IGNORE protege si dos requests
+     * intentan hacer el rollover
+     * simultáneamente.
+     */
+    await db
+      .prepare(
+        `insert or ignore into training_weeks (
+           id,
+           training_plan_id,
+           week_number,
+           focus_label,
+           total_target_distance,
+           notes
+         ) values (
+           ?1, ?2, ?3, ?4, ?5, ?6
+         )`
+      )
+      .bind(
+        candidateWeekId,
+        plan.id,
+        weekNumber,
+        generatedWeek.focus_label,
+        generatedWeek
+          .total_target_distance,
+        generatedWeek.notes
+      )
+      .run();
+
+    /*
+     * Recuperar el ID REAL.
+     */
+    const persistedWeek =
+      await db
+        .prepare(
+          `select id
+           from training_weeks
+           where training_plan_id = ?1
+             and week_number = ?2
+           limit 1`
+        )
+        .bind(
+          plan.id,
+          weekNumber
+        )
+        .first<any>();
+
+    if (!persistedWeek?.id) {
+      continue;
+    }
+
+    /*
+     * Evitar duplicar sesiones si
+     * otra solicitud ya creó la semana.
+     */
+    const sessionCount =
+      await db
+        .prepare(
+          `select count(*) as total
+           from training_sessions
+           where training_week_id = ?1`
+        )
+        .bind(
+          persistedWeek.id
+        )
+        .first<any>();
+
+    if (
+      Number(
+        sessionCount?.total || 0
+      ) === 0
+    ) {
+
+      statements.length = 0;
+
+      for (
+        const session of
+          generatedWeek.sessions || []
+      ) {
+        statements.push(
+          db
+            .prepare(
+              `insert into training_sessions (
+                 id,
+                 training_week_id,
+                 day_of_week,
+                 session_type,
+                 title,
+                 objective,
+                 distance_target,
+                 duration_target,
+                 intensity_zone,
+                 warmup_text,
+                 main_set_text,
+                 cooldown_text,
+                 estimated_load,
+                 status
+               ) values (
+                 ?1, ?2, ?3, ?4,
+                 ?5, ?6, ?7, ?8,
+                 ?9, ?10, ?11,
+                 ?12, ?13, ?14
+               )`
+            )
+            .bind(
+              crypto.randomUUID(),
+              persistedWeek.id,
+              session.day_of_week,
+              session.session_type,
+              session.title,
+              session.objective,
+              session.distance_target,
+              session.duration_target,
+              session.intensity_zone,
+              session.warmup_text,
+              session.main_set_text,
+              session.cooldown_text,
+              session.estimated_load,
+              session.status
+            )
+        );
+      }
+
+      if (statements.length) {
+        await db.batch(
+          statements
+        );
+      }
+    }
+
+    createdWeeks++;
+  }
+
+  return {
+    extended:
+      createdWeeks > 0,
+
+    createdWeeks,
+
+    currentWeekNumber:
+      rawCurrentWeek,
+
+    maxWeekNumber:
+      desiredMaxWeek,
+
+    reason:
+      "rolling_extension",
+  };
+}
+
+
 async function ensurePlanForUser(
   db: D1Database,
   userId: string,
@@ -5633,6 +6144,16 @@ app.get("/api/plan/:userId", async (c) => {
       );
     }
 
+    const rollingCoverage =
+      await ensureRollingTrainingPlanCoverage(
+        c.env.DB,
+        userId,
+        {
+          id: plan.id,
+          start_date: plan.start_date,
+        }
+      );
+
     const weekRows = await c.env.DB
       .prepare(
         `select id, week_number, focus_label, total_target_distance, notes
@@ -5722,6 +6243,7 @@ app.get("/api/plan/:userId", async (c) => {
       ok: true,
       plan,
       weeks,
+      rollingCoverage,
       autoPlan,
       runnerProfile: profile || null,
       runnerGoal: goal || null,
