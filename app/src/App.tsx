@@ -100,6 +100,7 @@ type TrainingPlan = {
   target_distance?: string;
   distance?: string;
   goal_distance?: string;
+  plan_summary?: string | null;
 };
 
 type Week = {
@@ -1023,6 +1024,217 @@ export default function App() {
   const completedThisWeek = currentSessions.filter((_, index) =>
     completedSessions[getProgressKey(currentWeek?.week_number || 1, index)]?.completed
   ).length;
+
+  // TRAININGAPP_COACH_EXPERIENCE_V1
+  const coachWeekSummary = useMemo(() => {
+    if (!currentWeek) return null;
+
+    const sessions = getOrderedTrainingSessions(
+      currentWeek.sessions || []
+    );
+
+    const totalSessions = sessions.length;
+
+    const completed = sessions.filter((_, index) => {
+      const key = getProgressKey(
+        currentWeek.week_number,
+        index
+      );
+
+      return Boolean(
+        completedSessions[key]?.completed
+      );
+    }).length;
+
+    const missed = sessions.filter((_, index) => {
+      const key = getProgressKey(
+        currentWeek.week_number,
+        index
+      );
+
+      return Boolean(
+        completedSessions[key]?.missed
+      );
+    }).length;
+
+    const consistency =
+      totalSessions > 0
+        ? Math.round(
+            (completed / totalSessions) * 100
+          )
+        : 0;
+
+    const focus =
+      String(
+        currentWeek.focus_label || ""
+      ).toLowerCase();
+
+    let weeklyObjective =
+      "Mantener continuidad y completar la carga planificada con buena recuperación.";
+
+    if (focus.includes("base")) {
+      weeklyObjective =
+        "Construir resistencia aeróbica y consolidar una rutina constante sin acumular fatiga innecesaria.";
+    } else if (
+      focus.includes("construcción") ||
+      focus.includes("construccion")
+    ) {
+      weeklyObjective =
+        "Aumentar progresivamente la capacidad de entrenamiento manteniendo control sobre la fatiga.";
+    } else if (
+      focus.includes("específica") ||
+      focus.includes("especifica")
+    ) {
+      weeklyObjective =
+        "Acercar el entrenamiento a las exigencias de tu objetivo y consolidar el ritmo específico de carrera.";
+    } else if (
+      focus.includes("descarga")
+    ) {
+      weeklyObjective =
+        "Reducir temporalmente la carga para absorber el entrenamiento acumulado y llegar fresco al siguiente bloque.";
+    } else if (
+      focus.includes("carrera") ||
+      focus.includes("ajuste final")
+    ) {
+      weeklyObjective =
+        "Llegar fresco al objetivo, manteniendo activación sin generar fatiga adicional.";
+    } else if (
+      focus.includes("continuidad")
+    ) {
+      weeklyObjective =
+        "Mantener continuidad mientras estabilizamos la carga antes del siguiente bloque de progresión.";
+    }
+
+    let statusLabel = "EN CURSO";
+    let statusTone = "cyan";
+    let statusDescription =
+      "Tu semana está activa y el plan sigue su progresión.";
+
+    if (missed > 0) {
+      statusLabel = "REVISAR CARGA";
+      statusTone = "warning";
+      statusDescription =
+        `${missed} sesión${missed === 1 ? "" : "es"} marcada${missed === 1 ? "" : "s"} como no realizada.`;
+    } else if (
+      totalSessions > 0 &&
+      completed === totalSessions
+    ) {
+      statusLabel = "SEMANA COMPLETADA";
+      statusTone = "success";
+      statusDescription =
+        "Completaste todas las sesiones programadas para esta semana.";
+    } else if (completed > 0) {
+      statusLabel = "VAS CONFORME AL PLAN";
+      statusTone = "success";
+      statusDescription =
+        "Ya comenzaste la carga semanal y no hay sesiones marcadas como perdidas.";
+    }
+
+    const currentDistance =
+      Number(
+        currentWeek.total_target_distance || 0
+      );
+
+    const previousWeek = weeks.find(
+      (week) =>
+        Number(week.week_number) ===
+        Number(currentWeek.week_number) - 1
+    );
+
+    const previousDistance =
+      Number(
+        previousWeek?.total_target_distance || 0
+      );
+
+    let loadLabel = "Planificada";
+
+    if (
+      previousDistance > 0 &&
+      currentDistance > 0
+    ) {
+      const ratio =
+        currentDistance /
+        previousDistance;
+
+      if (ratio < 0.92) {
+        loadLabel = "Descarga";
+      } else if (ratio > 1.08) {
+        loadLabel = "Progresiva";
+      } else {
+        loadLabel = "Estable";
+      }
+    }
+
+    const planText =
+      String(
+        trainingPlan?.plan_summary || ""
+      );
+
+    const distanceMatch =
+      planText.match(
+        /\b(5K|10K|15K|21K|42K)\b/i
+      );
+
+    const goalParts =
+      planText.split(" - ");
+
+    const goalLabel =
+      goalParts.length >= 2
+        ? goalParts[1]
+        : "Objetivo activo";
+
+    const priority = [
+      "interval",
+      "intervals",
+      "tempo",
+      "threshold",
+      "race_pace",
+      "long_run",
+    ];
+
+    let keySession =
+      sessions.find((session) =>
+        priority.some((type) =>
+          String(
+            session.session_type || ""
+          )
+            .toLowerCase()
+            .includes(type)
+        )
+      );
+
+    if (!keySession && sessions.length > 0) {
+      keySession = [...sessions].sort(
+        (a, b) =>
+          Number(b.distance_target || 0) -
+          Number(a.distance_target || 0)
+      )[0];
+    }
+
+    return {
+      consistency,
+      completed,
+      totalSessions,
+      missed,
+      weeklyObjective,
+      statusLabel,
+      statusTone,
+      statusDescription,
+      loadLabel,
+      volumeKm: currentDistance,
+      distanceLabel:
+        distanceMatch?.[1]?.toUpperCase() ||
+        "—",
+      goalLabel,
+      keySession,
+    };
+  }, [
+    currentWeek,
+    completedSessions,
+    weeks,
+    trainingPlan?.plan_summary,
+  ]);
+
   const manualMetrics = useMemo(
     () =>
       calculateManualMetrics(
@@ -2863,7 +3075,294 @@ async function fetchPlanSilently() {
                     </div>
                   </div>
 
-                  <div className="ai-review-card">
+                  
+              {coachWeekSummary && (
+                <div
+                  className="ai-review-card"
+                  data-coach-experience="true"
+                  style={{
+                    marginBottom: 18,
+                  }}
+                >
+                  <div>
+                    <span className="chip cyan">
+                      Tu semana
+                    </span>
+
+                    <h2
+                      style={{
+                        marginBottom: 4,
+                      }}
+                    >
+                      Semana {currentWeek.week_number} ·{" "}
+                      {currentWeek.focus_label || "Entrenamiento"}
+                    </h2>
+
+                    <p
+                      style={{
+                        marginTop: 0,
+                        opacity: 0.68,
+                      }}
+                    >
+                      {getTrainingWeekDateRange(
+                        trainingPlan,
+                        currentWeek.week_number
+                      )}
+                    </p>
+                  </div>
+
+                  <div
+                    style={{
+                      marginTop: 14,
+                      padding: "14px 16px",
+                      borderRadius: 14,
+                      background:
+                        "rgba(255,255,255,0.045)",
+                      border:
+                        "1px solid rgba(255,255,255,0.08)",
+                    }}
+                  >
+                    <strong
+                      style={{
+                        display: "block",
+                        fontSize: 13,
+                        letterSpacing: "0.04em",
+                      }}
+                    >
+                      {coachWeekSummary.statusLabel}
+                    </strong>
+
+                    <p
+                      style={{
+                        margin:
+                          "5px 0 0 0",
+                        fontSize: 13,
+                        opacity: 0.7,
+                      }}
+                    >
+                      {coachWeekSummary.statusDescription}
+                    </p>
+                  </div>
+
+                  <div
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns:
+                        "repeat(2, minmax(0, 1fr))",
+                      gap: 10,
+                      marginTop: 14,
+                    }}
+                  >
+                    <div
+                      style={{
+                        padding: 14,
+                        borderRadius: 14,
+                        background:
+                          "rgba(255,255,255,0.035)",
+                      }}
+                    >
+                      <span
+                        style={{
+                          display: "block",
+                          fontSize: 11,
+                          opacity: 0.55,
+                          marginBottom: 5,
+                          textTransform: "uppercase",
+                          letterSpacing: ".05em",
+                        }}
+                      >
+                        Consistencia
+                      </span>
+
+                      <strong>
+                        {coachWeekSummary.consistency}%
+                      </strong>
+
+                      <small
+                        style={{
+                          display: "block",
+                          marginTop: 4,
+                          opacity: 0.55,
+                        }}
+                      >
+                        {coachWeekSummary.completed}/
+                        {coachWeekSummary.totalSessions} sesiones
+                      </small>
+                    </div>
+
+                    <div
+                      style={{
+                        padding: 14,
+                        borderRadius: 14,
+                        background:
+                          "rgba(255,255,255,0.035)",
+                      }}
+                    >
+                      <span
+                        style={{
+                          display: "block",
+                          fontSize: 11,
+                          opacity: 0.55,
+                          marginBottom: 5,
+                          textTransform: "uppercase",
+                          letterSpacing: ".05em",
+                        }}
+                      >
+                        Carga
+                      </span>
+
+                      <strong>
+                        {coachWeekSummary.loadLabel}
+                      </strong>
+                    </div>
+
+                    <div
+                      style={{
+                        padding: 14,
+                        borderRadius: 14,
+                        background:
+                          "rgba(255,255,255,0.035)",
+                      }}
+                    >
+                      <span
+                        style={{
+                          display: "block",
+                          fontSize: 11,
+                          opacity: 0.55,
+                          marginBottom: 5,
+                          textTransform: "uppercase",
+                          letterSpacing: ".05em",
+                        }}
+                      >
+                        Volumen
+                      </span>
+
+                      <strong>
+                        {coachWeekSummary.volumeKm || "—"}
+                        {coachWeekSummary.volumeKm
+                          ? " km"
+                          : ""}
+                      </strong>
+                    </div>
+
+                    <div
+                      style={{
+                        padding: 14,
+                        borderRadius: 14,
+                        background:
+                          "rgba(255,255,255,0.035)",
+                      }}
+                    >
+                      <span
+                        style={{
+                          display: "block",
+                          fontSize: 11,
+                          opacity: 0.55,
+                          marginBottom: 5,
+                          textTransform: "uppercase",
+                          letterSpacing: ".05em",
+                        }}
+                      >
+                        Objetivo
+                      </span>
+
+                      <strong>
+                        {coachWeekSummary.distanceLabel}
+                      </strong>
+
+                      <small
+                        style={{
+                          display: "block",
+                          marginTop: 4,
+                          opacity: 0.55,
+                        }}
+                      >
+                        {coachWeekSummary.goalLabel}
+                      </small>
+                    </div>
+                  </div>
+
+                  <div
+                    style={{
+                      marginTop: 16,
+                    }}
+                  >
+                    <span
+                      style={{
+                        display: "block",
+                        fontSize: 11,
+                        fontWeight: 800,
+                        opacity: 0.55,
+                        textTransform: "uppercase",
+                        letterSpacing: ".06em",
+                        marginBottom: 6,
+                      }}
+                    >
+                      Objetivo de esta semana
+                    </span>
+
+                    <p
+                      style={{
+                        margin: 0,
+                        lineHeight: 1.55,
+                      }}
+                    >
+                      {coachWeekSummary.weeklyObjective}
+                    </p>
+                  </div>
+
+                  {coachWeekSummary.keySession && (
+                    <div
+                      style={{
+                        marginTop: 16,
+                        padding: "14px 16px",
+                        borderRadius: 14,
+                        background:
+                          "rgba(255,255,255,0.045)",
+                        border:
+                          "1px solid rgba(255,255,255,0.08)",
+                      }}
+                    >
+                      <span
+                        style={{
+                          display: "block",
+                          fontSize: 11,
+                          fontWeight: 800,
+                          opacity: 0.55,
+                          textTransform: "uppercase",
+                          letterSpacing: ".06em",
+                          marginBottom: 6,
+                        }}
+                      >
+                        ⭐ Sesión clave
+                      </span>
+
+                      <strong>
+                        {coachWeekSummary.keySession.title}
+                      </strong>
+
+                      <p
+                        style={{
+                          margin:
+                            "5px 0 0 0",
+                          fontSize: 13,
+                          opacity: 0.7,
+                        }}
+                      >
+                        {coachWeekSummary.keySession.day_of_week}
+                        {coachWeekSummary.keySession.distance_target
+                          ? ` · ${coachWeekSummary.keySession.distance_target} km`
+                          : ""}
+                        {coachWeekSummary.keySession.intensity_zone
+                          ? ` · ${coachWeekSummary.keySession.intensity_zone}`
+                          : ""}
+                      </p>
+                    </div>
+                  )}
+                </div>
+              )}
+
+<div className="ai-review-card">
                     <div>
                       <span className="chip cyan">IA entrenamiento</span>
                       <h2>Análisis inteligente de la semana</h2>
