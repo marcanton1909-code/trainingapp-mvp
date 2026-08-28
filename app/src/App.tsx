@@ -922,6 +922,9 @@ export default function App() {
     sleep: 4,
     notes: "",
   });
+  // TRAININGAPP_CHECKIN_FEEDBACK_V1
+  const [checkinFeedback, setCheckinFeedback] = useState("");
+
   const [aiReview, setAiReview] = useState<AiPlanReview | null>(null);
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState("");
@@ -2250,15 +2253,10 @@ async function fetchPlanSilently() {
       exhausted: "Muy cansado",
     };
 
-    const completionLabels: Record<string, string> = {
-      all: "Completé todos los entrenamientos",
-      some: "Completé algunos entrenamientos",
-      none: "No completé entrenamientos",
-    };
-
     const sorenessLabels: Record<string, string> = {
       none: "Sin molestias",
       light: "Molestia leve",
+      moderate: "Molestia moderada",
       strong: "Molestia fuerte",
     };
 
@@ -2272,13 +2270,21 @@ async function fetchPlanSilently() {
 
     const sorenessScoreByLevel: Record<string, number> = {
       none: 1,
-      light: 3,
+      light: 2,
+      moderate: 4,
       strong: 5,
     };
 
+    const completionText =
+      currentSessions.length === 0
+        ? "Sin sesiones programadas"
+        : completedThisWeek >= currentSessions.length
+        ? `Completó ${completedThisWeek} de ${currentSessions.length} sesiones`
+        : `Completó ${completedThisWeek} de ${currentSessions.length} sesiones`;
+
     const notes = [
       `Estado: ${feelingLabels[weeklyCheckin.feeling] || weeklyCheckin.feeling}`,
-      `Entrenamientos: ${completionLabels[weeklyCheckin.completion] || weeklyCheckin.completion}`,
+      `Entrenamientos: ${completionText}`,
       `Molestias: ${sorenessLabels[weeklyCheckin.soreness] || weeklyCheckin.soreness}`,
       weeklyCheckin.notes.trim() ? `Comentario: ${weeklyCheckin.notes.trim()}` : "",
     ]
@@ -2309,7 +2315,11 @@ async function fetchPlanSilently() {
         throw new Error(data?.error || "No fue posible guardar check-in");
       }
 
-      setResult(`Check-in guardado. Recomendación: ${data.recommendation}`);
+      setCheckinFeedback(
+        String(data.recommendation || "Mantén el plan de la semana.")
+      );
+
+      setResult("Check-in semanal guardado correctamente.");
     } catch (error) {
       setResult(error instanceof Error ? error.message : "Error inesperado");
     } finally {
@@ -2642,114 +2652,6 @@ async function fetchPlanSilently() {
                 </div>
               </div>
 
-              {isProCoach && (
-                <div className="pro-card">
-                  <span className="chip cyan">Pro Coach</span>
-                  <h2>Seguimiento semanal</h2>
-                  <p>
-                    Registra cómo te sentiste esta semana para recibir una recomendación
-                    y alimentar los futuros ajustes inteligentes del plan.
-                  </p>
-
-                  <div className="checkin-form">
-                    <label className="checkin-field">
-                      <span>¿Cómo te sentiste?</span>
-                      <select
-                        value={weeklyCheckin.feeling}
-                        onChange={(e) =>
-                          setWeeklyCheckin((prev) => ({ ...prev, feeling: e.target.value }))
-                        }
-                      >
-                        <option value="great">Muy bien</option>
-                        <option value="good">Bien</option>
-                        <option value="normal">Normal</option>
-                        <option value="tired">Cansado</option>
-                        <option value="exhausted">Muy cansado</option>
-                      </select>
-                    </label>
-
-                    <label className="checkin-field">
-                      <span>Entrenamientos completados</span>
-                      <select
-                        value={weeklyCheckin.completion}
-                        onChange={(e) =>
-                          setWeeklyCheckin((prev) => ({ ...prev, completion: e.target.value }))
-                        }
-                      >
-                        <option value="all">Todos</option>
-                        <option value="some">Algunos</option>
-                        <option value="none">Ninguno</option>
-                      </select>
-                    </label>
-
-                    <label className="checkin-field">
-                      <span>Fatiga</span>
-                      <select
-                        value={weeklyCheckin.fatigue}
-                        onChange={(e) =>
-                          setWeeklyCheckin((prev) => ({ ...prev, fatigue: Number(e.target.value) }))
-                        }
-                      >
-                        <option value={1}>1 · Muy baja</option>
-                        <option value={2}>2 · Baja</option>
-                        <option value={3}>3 · Media</option>
-                        <option value={4}>4 · Alta</option>
-                        <option value={5}>5 · Muy alta</option>
-                      </select>
-                    </label>
-
-                    <label className="checkin-field">
-                      <span>Molestias</span>
-                      <select
-                        value={weeklyCheckin.soreness}
-                        onChange={(e) =>
-                          setWeeklyCheckin((prev) => ({ ...prev, soreness: e.target.value }))
-                        }
-                      >
-                        <option value="none">No</option>
-                        <option value="light">Sí, leve</option>
-                        <option value="strong">Sí, fuerte</option>
-                      </select>
-                    </label>
-
-                    <label className="checkin-field">
-                      <span>Sueño / recuperación</span>
-                      <select
-                        value={weeklyCheckin.sleep}
-                        onChange={(e) =>
-                          setWeeklyCheckin((prev) => ({ ...prev, sleep: Number(e.target.value) }))
-                        }
-                      >
-                        <option value={1}>1 · Muy mal</option>
-                        <option value={2}>2 · Mal</option>
-                        <option value={3}>3 · Regular</option>
-                        <option value={4}>4 · Bien</option>
-                        <option value={5}>5 · Muy bien</option>
-                      </select>
-                    </label>
-
-                    <label className="checkin-field checkin-field-full">
-                      <span>Comentario opcional</span>
-                      <textarea
-                        rows={3}
-                        placeholder="Ej. Me sentí pesado en la tirada larga o tuve molestia en rodilla."
-                        value={weeklyCheckin.notes}
-                        onChange={(e) =>
-                          setWeeklyCheckin((prev) => ({ ...prev, notes: e.target.value }))
-                        }
-                      />
-                    </label>
-                  </div>
-
-                  <button
-                    className="primary-button"
-                    disabled={loading}
-                    onClick={saveQuickCheckin}
-                  >
-                    {loading ? "Guardando..." : "Guardar check-in semanal"}
-                  </button>
-                </div>
-              )}
             </section>
           )}
 
@@ -3357,6 +3259,153 @@ async function fetchPlanSilently() {
                           ? ` · ${coachWeekSummary.keySession.intensity_zone}`
                           : ""}
                       </p>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {isProCoach && (
+                <div className="pro-card" data-coach-checkin="true">
+                  <span className="chip cyan">Pro Coach</span>
+                  <h2>Check-in de recuperación</h2>
+                  <p>
+                    Cuéntale a trAIning cómo estás llegando a esta semana.
+                    Tu recuperación se utiliza para interpretar la carga y proteger
+                    los ritmos cuando sea necesario.
+                  </p>
+
+                  <div className="checkin-form">
+                    <label className="checkin-field">
+                      <span>¿Cómo te sentiste?</span>
+                      <select
+                        value={weeklyCheckin.feeling}
+                        onChange={(e) =>
+                          setWeeklyCheckin((prev) => ({ ...prev, feeling: e.target.value }))
+                        }
+                      >
+                        <option value="great">Muy bien</option>
+                        <option value="good">Bien</option>
+                        <option value="normal">Normal</option>
+                        <option value="tired">Cansado</option>
+                        <option value="exhausted">Muy cansado</option>
+                      </select>
+                    </label>
+
+                    <label className="checkin-field">
+                      <span>Entrenamientos completados</span>
+                      <select
+                        value={weeklyCheckin.completion}
+                        onChange={(e) =>
+                          setWeeklyCheckin((prev) => ({ ...prev, completion: e.target.value }))
+                        }
+                      >
+                        <option value="all">Todos</option>
+                        <option value="some">Algunos</option>
+                        <option value="none">Ninguno</option>
+                      </select>
+                    </label>
+
+                    <label className="checkin-field">
+                      <span>Fatiga</span>
+                      <select
+                        value={weeklyCheckin.fatigue}
+                        onChange={(e) =>
+                          setWeeklyCheckin((prev) => ({ ...prev, fatigue: Number(e.target.value) }))
+                        }
+                      >
+                        <option value={1}>1 · Muy baja</option>
+                        <option value={2}>2 · Baja</option>
+                        <option value={3}>3 · Media</option>
+                        <option value={4}>4 · Alta</option>
+                        <option value={5}>5 · Muy alta</option>
+                      </select>
+                    </label>
+
+                    <label className="checkin-field">
+                      <span>Molestias</span>
+                      <select
+                        value={weeklyCheckin.soreness}
+                        onChange={(e) =>
+                          setWeeklyCheckin((prev) => ({ ...prev, soreness: e.target.value }))
+                        }
+                      >
+                        <option value="none">No</option>
+                        <option value="light">Sí, leve</option>
+                        <option value="moderate">Sí, moderada</option>
+                        <option value="strong">Sí, fuerte</option>
+                      </select>
+                    </label>
+
+                    <label className="checkin-field">
+                      <span>Sueño / recuperación</span>
+                      <select
+                        value={weeklyCheckin.sleep}
+                        onChange={(e) =>
+                          setWeeklyCheckin((prev) => ({ ...prev, sleep: Number(e.target.value) }))
+                        }
+                      >
+                        <option value={1}>1 · Muy mal</option>
+                        <option value={2}>2 · Mal</option>
+                        <option value={3}>3 · Regular</option>
+                        <option value={4}>4 · Bien</option>
+                        <option value={5}>5 · Muy bien</option>
+                      </select>
+                    </label>
+
+                    <label className="checkin-field checkin-field-full">
+                      <span>Comentario opcional</span>
+                      <textarea
+                        rows={3}
+                        placeholder="Ej. Me sentí pesado en la tirada larga o tuve molestia en rodilla."
+                        value={weeklyCheckin.notes}
+                        onChange={(e) =>
+                          setWeeklyCheckin((prev) => ({ ...prev, notes: e.target.value }))
+                        }
+                      />
+                    </label>
+                  </div>
+
+                  <button
+                    className="primary-button"
+                    disabled={loading}
+                    onClick={saveQuickCheckin}
+                  >
+                    {loading ? "Guardando..." : "Guardar check-in semanal"}
+                  </button>
+
+                  {checkinFeedback && (
+                    <div
+                      data-checkin-coach-response="true"
+                      style={{
+                        marginTop: 16,
+                        padding: "15px 16px",
+                        borderRadius: 14,
+                        background: "rgba(255,255,255,0.045)",
+                        border: "1px solid rgba(255,255,255,0.08)",
+                      }}
+                    >
+                      <span
+                        style={{
+                          display: "block",
+                          marginBottom: 6,
+                          fontSize: 11,
+                          fontWeight: 850,
+                          letterSpacing: ".06em",
+                          textTransform: "uppercase",
+                          color: "rgba(255,255,255,0.55)",
+                        }}
+                      >
+                        Respuesta de tu Coach
+                      </span>
+
+                      <strong
+                        style={{
+                          display: "block",
+                          lineHeight: 1.5,
+                        }}
+                      >
+                        {checkinFeedback}
+                      </strong>
                     </div>
                   )}
                 </div>
