@@ -103,6 +103,30 @@ type TrainingPlan = {
   plan_summary?: string | null;
 };
 
+// TRAININGAPP_ADAPTIVE_ADJUSTMENT_TYPE_V1
+type AdaptiveAdjustment = {
+  source_week_number: number;
+  target_week_number: number;
+  status: string;
+  action: "increase" | "maintain" | "reduce";
+  risk_level: "low" | "medium" | "high";
+  volume_factor: number;
+  pace_delta_seconds: number;
+  completion_rate: number;
+  distance_completion_rate: number;
+  planned_distance_km: number;
+  actual_distance_km: number;
+  average_pace_seconds_per_km?: number | null;
+  average_effort_score?: number | null;
+  fatigue_score: number;
+  soreness_score: number;
+  sleep_quality_score: number;
+  reason: string;
+  source?: string;
+  scheduled_for?: string;
+  applied_at?: string;
+};
+
 type Week = {
   id?: string;
   week_number: number;
@@ -925,6 +949,10 @@ export default function App() {
   // TRAININGAPP_CHECKIN_FEEDBACK_V1
   const [checkinFeedback, setCheckinFeedback] = useState("");
 
+  // TRAININGAPP_ADAPTIVE_COACH_UI_V1
+  const [adaptiveAdjustment, setAdaptiveAdjustment] =
+    useState<AdaptiveAdjustment | null>(null);
+
   const [aiReview, setAiReview] = useState<AiPlanReview | null>(null);
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState("");
@@ -1000,6 +1028,56 @@ export default function App() {
     };
   }, []);
 
+  // TRAININGAPP_LOAD_ADAPTIVE_ADJUSTMENT_V1
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadAdaptiveAdjustment() {
+      if (!authUser || !authToken) {
+        if (!cancelled) {
+          setAdaptiveAdjustment(null);
+        }
+        return;
+      }
+
+      try {
+        const res = await fetch(
+          `${API_URL}/api/adaptive/me`,
+          {
+            headers: {
+              Authorization: `Bearer ${authToken}`,
+            },
+          }
+        );
+
+        if (!res.ok) {
+          if (!cancelled) {
+            setAdaptiveAdjustment(null);
+          }
+          return;
+        }
+
+        const data = await res.json();
+
+        if (!cancelled) {
+          setAdaptiveAdjustment(
+            data?.adjustment || null
+          );
+        }
+      } catch {
+        if (!cancelled) {
+          setAdaptiveAdjustment(null);
+        }
+      }
+    }
+
+    loadAdaptiveAdjustment();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [authUser, authToken]);
+
   const activeWeekNumber = useMemo(
     () => getCurrentPlanWeekNumber(trainingPlan, weeks),
     [trainingPlan, weeks, trainingCalendarClock]
@@ -1014,6 +1092,15 @@ export default function App() {
     () => getWeekByNumber(weeks, visibleWeekNumber),
     [weeks, visibleWeekNumber]
   );
+
+  // TRAININGAPP_CURRENT_ADAPTIVE_ADJUSTMENT_V1
+  const currentAdaptiveAdjustment =
+    adaptiveAdjustment &&
+    currentWeek &&
+    Number(adaptiveAdjustment.target_week_number) ===
+      Number(currentWeek.week_number)
+      ? adaptiveAdjustment
+      : null;
 
   const currentSessions = getOrderedTrainingSessions(currentWeek?.sessions || []);
   const highlightedSession =
@@ -3264,7 +3351,263 @@ async function fetchPlanSilently() {
                 </div>
               )}
 
-              {isProCoach && (
+              {currentAdaptiveAdjustment && (
+                <div
+                  className="pro-card"
+                  data-adaptive-coach-card="true"
+                  style={{
+                    marginBottom: 18,
+                  }}
+                >
+                  <span className="chip cyan">
+                    Adaptive Coach
+                  </span>
+
+                  <h2>
+                    {currentAdaptiveAdjustment.action === "increase"
+                      ? "Plan progresado"
+                      : currentAdaptiveAdjustment.action === "reduce"
+                      ? "Carga ajustada"
+                      : "Plan mantenido"}
+                  </h2>
+
+                  <p>
+                    trAIning analizó tu respuesta a la semana anterior
+                    antes de preparar esta semana.
+                  </p>
+
+                  <div
+                    style={{
+                      marginTop: 14,
+                      padding: "15px 16px",
+                      borderRadius: 14,
+                      background: "rgba(255,255,255,0.045)",
+                      border: "1px solid rgba(255,255,255,0.08)",
+                    }}
+                  >
+                    <span
+                      style={{
+                        display: "block",
+                        fontSize: 11,
+                        fontWeight: 850,
+                        letterSpacing: ".06em",
+                        textTransform: "uppercase",
+                        opacity: 0.55,
+                        marginBottom: 6,
+                      }}
+                    >
+                      Decisión del Coach
+                    </span>
+
+                    <strong
+                      style={{
+                        display: "block",
+                        fontSize: 18,
+                      }}
+                    >
+                      {currentAdaptiveAdjustment.action === "increase"
+                        ? "Progresión conservadora"
+                        : currentAdaptiveAdjustment.action === "reduce"
+                        ? "Reducción de carga"
+                        : "Mantener carga"}
+                    </strong>
+
+                    <p
+                      style={{
+                        margin: "7px 0 0 0",
+                        lineHeight: 1.55,
+                        opacity: 0.72,
+                      }}
+                    >
+                      {currentAdaptiveAdjustment.reason}
+                    </p>
+                  </div>
+
+                  <div
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns:
+                        "repeat(2, minmax(0, 1fr))",
+                      gap: 10,
+                      marginTop: 14,
+                    }}
+                  >
+                    <div
+                      style={{
+                        padding: 14,
+                        borderRadius: 14,
+                        background: "rgba(255,255,255,0.035)",
+                      }}
+                    >
+                      <span
+                        style={{
+                          display: "block",
+                          fontSize: 10,
+                          opacity: 0.55,
+                          textTransform: "uppercase",
+                          marginBottom: 5,
+                        }}
+                      >
+                        Adherencia
+                      </span>
+
+                      <strong>
+                        {Math.round(
+                          Number(
+                            currentAdaptiveAdjustment.completion_rate || 0
+                          ) * 100
+                        )}
+                        %
+                      </strong>
+                    </div>
+
+                    <div
+                      style={{
+                        padding: 14,
+                        borderRadius: 14,
+                        background: "rgba(255,255,255,0.035)",
+                      }}
+                    >
+                      <span
+                        style={{
+                          display: "block",
+                          fontSize: 10,
+                          opacity: 0.55,
+                          textTransform: "uppercase",
+                          marginBottom: 5,
+                        }}
+                      >
+                        Distancia realizada
+                      </span>
+
+                      <strong>
+                        {currentAdaptiveAdjustment.actual_distance_km} km
+                      </strong>
+
+                      <small
+                        style={{
+                          display: "block",
+                          marginTop: 4,
+                          opacity: 0.5,
+                        }}
+                      >
+                        de {currentAdaptiveAdjustment.planned_distance_km} km
+                      </small>
+                    </div>
+
+                    <div
+                      style={{
+                        padding: 14,
+                        borderRadius: 14,
+                        background: "rgba(255,255,255,0.035)",
+                      }}
+                    >
+                      <span
+                        style={{
+                          display: "block",
+                          fontSize: 10,
+                          opacity: 0.55,
+                          textTransform: "uppercase",
+                          marginBottom: 5,
+                        }}
+                      >
+                        Ajuste de volumen
+                      </span>
+
+                      <strong>
+                        {currentAdaptiveAdjustment.action === "increase"
+                          ? `+${Math.round(
+                              (Number(
+                                currentAdaptiveAdjustment.volume_factor
+                              ) -
+                                1) *
+                                100
+                            )}%`
+                          : currentAdaptiveAdjustment.action === "reduce"
+                          ? `${Math.round(
+                              (Number(
+                                currentAdaptiveAdjustment.volume_factor
+                              ) -
+                                1) *
+                                100
+                            )}%`
+                          : "Sin cambio"}
+                      </strong>
+                    </div>
+
+                    <div
+                      style={{
+                        padding: 14,
+                        borderRadius: 14,
+                        background: "rgba(255,255,255,0.035)",
+                      }}
+                    >
+                      <span
+                        style={{
+                          display: "block",
+                          fontSize: 10,
+                          opacity: 0.55,
+                          textTransform: "uppercase",
+                          marginBottom: 5,
+                        }}
+                      >
+                        Semana actual
+                      </span>
+
+                      <strong>
+                        {currentWeek.total_target_distance} km
+                      </strong>
+                    </div>
+                  </div>
+
+                  {(currentAdaptiveAdjustment.fatigue_score > 0 ||
+                    currentAdaptiveAdjustment.sleep_quality_score > 0 ||
+                    currentAdaptiveAdjustment.soreness_score > 0) && (
+                    <div
+                      style={{
+                        display: "flex",
+                        flexWrap: "wrap",
+                        gap: 8,
+                        marginTop: 14,
+                      }}
+                    >
+                      {currentAdaptiveAdjustment.fatigue_score > 0 && (
+                        <span className="chip">
+                          Fatiga {currentAdaptiveAdjustment.fatigue_score}/5
+                        </span>
+                      )}
+
+                      {currentAdaptiveAdjustment.sleep_quality_score > 0 && (
+                        <span className="chip">
+                          Sueño{" "}
+                          {currentAdaptiveAdjustment.sleep_quality_score}/5
+                        </span>
+                      )}
+
+                      {currentAdaptiveAdjustment.soreness_score > 0 && (
+                        <span className="chip">
+                          Molestias{" "}
+                          {currentAdaptiveAdjustment.soreness_score}/5
+                        </span>
+                      )}
+                    </div>
+                  )}
+
+                  <p
+                    style={{
+                      marginTop: 14,
+                      marginBottom: 0,
+                      fontSize: 12,
+                      opacity: 0.55,
+                    }}
+                  >
+                    Ajuste aplicado automáticamente antes de iniciar
+                    la semana {currentAdaptiveAdjustment.target_week_number}.
+                  </p>
+                </div>
+              )}
+
+{isProCoach && (
                 <div className="pro-card" data-coach-checkin="true">
                   <span className="chip cyan">Pro Coach</span>
                   <h2>Check-in de recuperación</h2>
