@@ -2059,8 +2059,24 @@ function adaptTrainingSession(
     sessionFactor = 1;
   }
 
+  // TRAININGAPP_ADAPTIVE_DISTANCE_FLOOR_SAFE_V2
+  // Una reducción nunca debe aumentar una sesión corta sólo por el mínimo de 3 km.
+  const minimumDistance =
+    decision.action === "reduce"
+      ? Math.max(1, previousDistance * decision.volumeFactor)
+      : Math.min(3, previousDistance);
+
+  const maximumDistance =
+    decision.action === "increase"
+      ? previousDistance * 1.08
+      : previousDistance;
+
   const nextDistance = roundToHalf(
-    clamp(previousDistance * sessionFactor, 3, previousDistance * 1.08)
+    clamp(
+      previousDistance * sessionFactor,
+      minimumDistance,
+      maximumDistance
+    )
   );
   const nextType = convertedToEasy ? "easy_run" : session.session_type;
   const nextTitle = convertedToEasy
