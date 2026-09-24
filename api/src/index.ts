@@ -1665,9 +1665,496 @@ function buildSessionsForWeek(
   );
 }
 
+// TRAININGAPP_SAFE_GOAL_REBASE_V1
+
+function getTrainingLongRunHardCap(
+  targetDistanceKm: number
+) {
+  /*
+   * Política trAIning:
+   *
+   * Un plan de 21K nunca prescribe
+   * una tirada larga superior a 21.1 km.
+   *
+   * Para 5K/10K/15K no imponemos aquí
+   * la distancia de carrera como máximo,
+   * porque una tirada larga puede superar
+   * legítimamente esas distancias.
+   */
+  if (
+    targetDistanceKm >= 20 &&
+    targetDistanceKm <= 22
+  ) {
+    return 21.1;
+  }
+
+  return Number.POSITIVE_INFINITY;
+}
+
+function replaceTrainingKmText(
+  text: string,
+  nextDistanceKm: number
+) {
+  const formatted =
+    Number.isInteger(nextDistanceKm)
+      ? String(nextDistanceKm)
+      : nextDistanceKm.toFixed(1);
+
+  return String(text || "").replace(
+    /\d+(?:\.\d+)?\s*km/i,
+    `${formatted} km`
+  );
+}
+
+function capLongRunForGoal(
+  session: any,
+  targetDistanceKm: number
+) {
+  const type =
+    String(
+      session.session_type || ""
+    ).toLowerCase();
+
+  const oldDistance =
+    Number(
+      session.distance_target || 0
+    );
+
+  if (
+    !type.includes("long") ||
+    oldDistance <= 0
+  ) {
+    return session;
+  }
+
+  const hardCap =
+    getTrainingLongRunHardCap(
+      targetDistanceKm
+    );
+
+  if (
+    !Number.isFinite(hardCap) ||
+    oldDistance <= hardCap
+  ) {
+    return session;
+  }
+
+  const nextDistance =
+    roundToHalf(hardCap);
+
+  const ratio =
+    nextDistance / oldDistance;
+
+  return {
+    ...session,
+
+    distance_target:
+      nextDistance,
+
+    duration_target:
+      estimateMinutes(
+        nextDistance,
+        session.session_type
+      ),
+
+    main_set_text:
+      replaceTrainingKmText(
+        session.main_set_text,
+        nextDistance
+      ),
+
+    estimated_load:
+      Number(
+        session.estimated_load || 0
+      ) > 0
+        ? Math.max(
+            1,
+            Math.round(
+              Number(
+                session.estimated_load
+              ) * ratio
+            )
+          )
+        : session.estimated_load,
+  };
+}
+
+function applySafeGoalProgression(
+  weeks: any[],
+  baselineLongRunKm: number,
+  baselineWeeklyVolumeKm: number,
+  targetDistanceKm: number
+) {
+  let previousLongRun =
+    Math.max(
+      3,
+      Number(
+        baselineLongRunKm || 0
+      )
+    );
+
+  let previousVolume =
+    Math.max(
+      8,
+      Number(
+        baselineWeeklyVolumeKm || 0
+      )
+    );
+
+  const hardCap =
+    getTrainingLongRunHardCap(
+      targetDistanceKm
+    );
+
+  return weeks.map(
+    (week: any, index: number) => {
+      const focus =
+        String(
+          week.focus_label || ""
+        ).toLowerCase();
+
+      const isRecoveryWeek =
+        focus.includes("descarga");
+
+      const isFinalWeek =
+        index === weeks.length - 1;
+
+      let sessions =
+        (week.sessions || []).map(
+          (session: any) => {
+            const type =
+              String(
+                session.session_type || ""
+              ).toLowerCase();
+
+            const oldDistance =
+              Number(
+                session.distance_target || 0
+              );
+
+            if (
+              !type.includes("long") ||
+              oldDistance <= 0
+            ) {
+              return session;
+            }
+
+            /*
+             * Semana normal:
+             * máximo +15%, con tope de +2 km.
+             */
+            const normalIncrease =
+              Math.min(
+                2,
+                Math.max(
+                  1,
+                  previousLongRun * 0.15
+                )
+              );
+
+            let allowedLongRun =
+              previousLongRun +
+              normalIncrease;
+
+            /*
+             * Una descarga NO puede aumentar
+             * la tirada larga.
+             */
+            if (isRecoveryWeek) {
+              allowedLongRun =
+                previousLongRun * 0.90;
+            }
+
+            /*
+             * Semana final / taper.
+             */
+            if (isFinalWeek) {
+              allowedLongRun =
+                Math.min(
+                  allowedLongRun,
+                  previousLongRun * 0.75
+                );
+            }
+
+            allowedLongRun =
+              roundToHalf(
+                Math.max(
+                  3,
+                  allowedLongRun
+                )
+              );
+
+            const nextDistance =
+              roundToHalf(
+                Math.min(
+                  oldDistance,
+                  allowedLongRun,
+                  hardCap
+                )
+              );
+
+            const ratio =
+              oldDistance > 0
+                ? nextDistance /
+                  oldDistance
+                : 1;
+
+            return {
+              ...session,
+
+              distance_target:
+                nextDistance,
+
+              duration_target:
+                estimateMinutes(
+                  nextDistance,
+                  session.session_type
+                ),
+
+              main_set_text:
+                replaceTrainingKmText(
+                  session.main_set_text,
+                  nextDistance
+                ),
+
+              estimated_load:
+                Number(
+                  session.estimated_load || 0
+                ) > 0
+                  ? Math.max(
+                      1,
+                      Math.round(
+                        Number(
+                          session.estimated_load
+                        ) * ratio
+                      )
+                    )
+                  : session.estimated_load,
+            };
+          }
+        );
+
+      /*
+       * Volumen semanal:
+       *
+       * normal  <= +10%
+       * descarga <= 90%
+       * taper    <= 75%
+       */
+      const plannedVolume =
+        sessions.reduce(
+          (
+            total: number,
+            session: any
+          ) =>
+            total +
+            Number(
+              session.distance_target || 0
+            ),
+          0
+        );
+
+      let volumeCap =
+        previousVolume * 1.10;
+
+      if (isRecoveryWeek) {
+        volumeCap =
+          previousVolume * 0.90;
+      }
+
+      if (isFinalWeek) {
+        volumeCap =
+          Math.min(
+            volumeCap,
+            previousVolume * 0.75
+          );
+      }
+
+      if (
+        plannedVolume > volumeCap &&
+        plannedVolume > 0
+      ) {
+        const scale =
+          volumeCap /
+          plannedVolume;
+
+        sessions =
+          sessions.map(
+            (session: any) => {
+              const oldDistance =
+                Number(
+                  session.distance_target || 0
+                );
+
+              if (oldDistance <= 0) {
+                return session;
+              }
+
+              let nextDistance =
+                roundToHalf(
+                  Math.max(
+                    2,
+                    oldDistance * scale
+                  )
+                );
+
+              const type =
+                String(
+                  session.session_type || ""
+                ).toLowerCase();
+
+              if (
+                type.includes("long")
+              ) {
+                nextDistance =
+                  roundToHalf(
+                    Math.min(
+                      nextDistance,
+                      hardCap
+                    )
+                  );
+              }
+
+              const ratio =
+                oldDistance > 0
+                  ? nextDistance /
+                    oldDistance
+                  : 1;
+
+              return {
+                ...session,
+
+                distance_target:
+                  nextDistance,
+
+                duration_target:
+                  estimateMinutes(
+                    nextDistance,
+                    session.session_type
+                  ),
+
+                main_set_text:
+                  replaceTrainingKmText(
+                    session.main_set_text,
+                    nextDistance
+                  ),
+
+                estimated_load:
+                  Number(
+                    session.estimated_load || 0
+                  ) > 0
+                    ? Math.max(
+                        1,
+                        Math.round(
+                          Number(
+                            session.estimated_load
+                          ) * ratio
+                        )
+                      )
+                    : session.estimated_load,
+              };
+            }
+          );
+      }
+
+      /*
+       * Volvemos a imponer hard cap al final.
+       */
+      sessions =
+        sessions.map(
+          (session: any) =>
+            capLongRunForGoal(
+              session,
+              targetDistanceKm
+            )
+        );
+
+      const totalTargetDistance =
+        roundToHalf(
+          sessions.reduce(
+            (
+              total: number,
+              session: any
+            ) =>
+              total +
+              Number(
+                session.distance_target || 0
+              ),
+            0
+          )
+        );
+
+      const longRunKm =
+        sessions.reduce(
+          (
+            longest: number,
+            session: any
+          ) => {
+            const type =
+              String(
+                session.session_type || ""
+              ).toLowerCase();
+
+            if (
+              !type.includes("long")
+            ) {
+              return longest;
+            }
+
+            return Math.max(
+              longest,
+              Number(
+                session.distance_target || 0
+              )
+            );
+          },
+          0
+        );
+
+      if (longRunKm > 0) {
+        previousLongRun =
+          longRunKm;
+      }
+
+      if (totalTargetDistance > 0) {
+        previousVolume =
+          totalTargetDistance;
+      }
+
+      return {
+        ...week,
+
+        focus_label:
+          index === 0
+            ? `Transición progresiva ${distanceLabel(
+                targetDistanceKm
+              )}`
+            : week.focus_label,
+
+        total_target_distance:
+          totalTargetDistance,
+
+        notes:
+          index === 0
+            ? [
+                "Transición basada en el historial real reciente del atleta.",
+                week.notes || "",
+              ]
+                .filter(Boolean)
+                .join(" ")
+            : week.notes,
+
+        sessions,
+      };
+    }
+  );
+}
+
+
 function buildPlanStructure(
   input: AthleteProfileInput,
-  workoutLibrary: WorkoutLibraryItem[] = []
+  workoutLibrary: WorkoutLibraryItem[] = [],
+  forcedTotalWeeks?: number
 ) {
   const isRecoveryConditionPlan = isRecoverFitnessGoal(input.goal);
   const distanceKm = isRecoveryConditionPlan
@@ -1675,12 +2162,38 @@ function buildPlanStructure(
     : normalizeDistance(input.distance);
   const totalWeeks = isRecoveryConditionPlan
     ? getRecoverFitnessWeeks()
-    : determinePlanWeeks(distanceKm, input.eventDate);
+    : Number.isFinite(forcedTotalWeeks) &&
+      Number(forcedTotalWeeks) > 0
+    ? Math.max(
+        1,
+        Math.min(
+          24,
+          Math.round(
+            Number(forcedTotalWeeks)
+          )
+        )
+      )
+    : determinePlanWeeks(
+        distanceKm,
+        input.eventDate
+      );
 
   return Array.from({ length: totalWeeks }, (_, index) => {
     const weekNumber = index + 1;
     const phase = getWeekPhase(weekNumber, totalWeeks);
-    const sessions = buildSessionsForWeek(input, weekNumber, totalWeeks, workoutLibrary);
+    const sessions =
+      buildSessionsForWeek(
+        input,
+        weekNumber,
+        totalWeeks,
+        workoutLibrary
+      ).map(
+        (session: any) =>
+          capLongRunForGoal(
+            session,
+            distanceKm
+          )
+      );
     const totalTargetDistance = roundToHalf(
       sessions.reduce(
         (sum, session) => sum + Number(session.distance_target || 0),
@@ -3312,6 +3825,520 @@ async function refreshExistingPlanFromCurrentWeek(
   const currentWeekNumber =
     Number(calendar.currentWeekNumber || 1);
 
+  // TRAININGAPP_PROGRESSIVE_HISTORY_V1
+
+  /*
+   * Una carrera siempre reconstruye las semanas
+   * actuales/futuras a partir del historial real.
+   *
+   * Esto también repara un plan inseguro aunque
+   * el usuario vuelva a guardar exactamente
+   * el mismo objetivo.
+   */
+  const shouldProgressiveRebase =
+    !isRecoverFitnessGoal(
+      input.goal
+    );
+
+  const targetDistanceKm =
+    isRecoverFitnessGoal(
+      input.goal
+    )
+      ? 0
+      : normalizeDistance(
+          input.distance
+        );
+
+  /*
+   * ¿La semana actual ya comenzó?
+   */
+  const currentWeekProgressResult =
+    await db
+      .prepare(
+        `select
+           session_index,
+           training_session_id,
+           is_completed,
+           actual_distance_km
+         from training_session_progress
+         where user_id = ?1
+           and week_number = ?2
+           and (
+             training_plan_id = ?3
+             or (
+               training_plan_id is null
+               and updated_at >= ?4
+             )
+           )`
+      )
+      .bind(
+        userId,
+        currentWeekNumber,
+        plan.id,
+        plan.created_at
+      )
+      .all<any>();
+
+  const currentWeekProgress =
+    currentWeekProgressResult.results ||
+    [];
+
+  const currentWeekHasProgress =
+    currentWeekProgress.length > 0;
+
+  /*
+   * Si ya comenzó:
+   * conservamos esa semana y regeneramos
+   * desde la siguiente.
+   */
+  const regenerationStartWeek =
+    shouldProgressiveRebase
+      ? currentWeekNumber +
+        (
+          currentWeekHasProgress
+            ? 1
+            : 0
+        )
+      : currentWeekNumber;
+
+  /*
+   * Historial REAL de las 4 semanas
+   * ANTERIORES a la semana actual.
+   */
+  const historyResult =
+    await db
+      .prepare(
+        `select
+           week_number,
+
+           sum(
+             case
+               when is_completed = 1
+               then coalesce(
+                 actual_distance_km,
+                 0
+               )
+               else 0
+             end
+           ) as actual_week_km,
+
+           max(
+             case
+               when is_completed = 1
+               then coalesce(
+                 actual_distance_km,
+                 0
+               )
+               else 0
+             end
+           ) as longest_completed_km
+
+         from training_session_progress
+
+         where user_id = ?1
+           and week_number < ?2
+
+           and (
+             training_plan_id = ?3
+             or (
+               training_plan_id is null
+               and updated_at >= ?4
+             )
+           )
+
+         group by week_number
+
+         having sum(
+           case
+             when is_completed = 1
+             then coalesce(
+               actual_distance_km,
+               0
+             )
+             else 0
+           end
+         ) > 0
+
+         order by week_number desc
+         limit 4`
+      )
+      .bind(
+        userId,
+        currentWeekNumber,
+        plan.id,
+        plan.created_at
+      )
+      .all<any>();
+
+  const historyRows =
+    historyResult.results || [];
+
+  /*
+   * Para progreso histórico donde se perdió
+   * training_session_id durante refresh previos,
+   * usamos la sesión completada más larga como
+   * proxy conservador de tirada larga reciente.
+   */
+  const historicalLongRunKm =
+    historyRows.reduce(
+      (
+        longest: number,
+        row: any
+      ) =>
+        Math.max(
+          longest,
+          Number(
+            row.longest_completed_km ||
+              0
+          )
+        ),
+      0
+    );
+
+  const fallbackLongRunKm =
+    roundToHalf(
+      Math.max(
+        3,
+        Number(
+          input.currentVolumeKm || 0
+        ) * 0.35
+      )
+    );
+
+  const baselineLongRunKm =
+    historicalLongRunKm > 0
+      ? roundToHalf(
+          historicalLongRunKm
+        )
+      : fallbackLongRunKm;
+
+  const historicalWeeklyVolumes =
+    historyRows
+      .map(
+        (row: any) =>
+          Number(
+            row.actual_week_km || 0
+          )
+      )
+      .filter(
+        (value: number) =>
+          value > 0
+      );
+
+  const baselineWeeklyVolumeKm =
+    roundToHalf(
+      historicalWeeklyVolumes.length
+        ? historicalWeeklyVolumes.reduce(
+            (
+              total: number,
+              value: number
+            ) =>
+              total + value,
+            0
+          ) /
+          historicalWeeklyVolumes.length
+        : Math.max(
+            8,
+            Number(
+              input.currentVolumeKm || 0
+            )
+          )
+    );
+
+  /*
+   * Si la semana actual ya tiene progreso,
+   * no la reconstruimos.
+   *
+   * PERO sí corregimos una tirada larga
+   * futura/no completada que sea claramente
+   * insegura.
+   */
+  let currentWeekSafetyAdjusted =
+    false;
+
+  if (
+    shouldProgressiveRebase &&
+    currentWeekHasProgress
+  ) {
+    const currentWeek =
+      existingWeeks.find(
+        (week: any) =>
+          Number(
+            week.week_number
+          ) === currentWeekNumber
+      );
+
+    if (currentWeek?.id) {
+      const currentSessionsResult =
+        await db
+          .prepare(
+            `select
+               id,
+               session_type,
+               distance_target,
+               duration_target,
+               main_set_text,
+               estimated_load
+             from training_sessions
+             where training_week_id = ?1
+             order by rowid asc`
+          )
+          .bind(
+            currentWeek.id
+          )
+          .all<any>();
+
+      const currentSessions =
+        currentSessionsResult.results ||
+        [];
+
+      const normalIncrease =
+        Math.min(
+          2,
+          Math.max(
+            1,
+            baselineLongRunKm * 0.15
+          )
+        );
+
+      const currentSafeLongRun =
+        roundToHalf(
+          Math.min(
+            baselineLongRunKm +
+              normalIncrease,
+            getTrainingLongRunHardCap(
+              targetDistanceKm
+            )
+          )
+        );
+
+      for (
+        let index = 0;
+        index < currentSessions.length;
+        index++
+      ) {
+        const session =
+          currentSessions[index];
+
+        const type =
+          String(
+            session.session_type || ""
+          ).toLowerCase();
+
+        if (
+          !type.includes("long")
+        ) {
+          continue;
+        }
+
+        const plannedDistance =
+          Number(
+            session.distance_target || 0
+          );
+
+        /*
+         * Si sabemos que la sesión ya fue
+         * completada, no tocamos su objetivo.
+         */
+        const completed =
+          currentWeekProgress.some(
+            (progress: any) => {
+              if (
+                Number(
+                  progress.is_completed
+                ) !== 1
+              ) {
+                return false;
+              }
+
+              if (
+                progress.training_session_id &&
+                String(
+                  progress.training_session_id
+                ) ===
+                  String(
+                    session.id
+                  )
+              ) {
+                return true;
+              }
+
+              if (
+                !progress.training_session_id
+              ) {
+                const progressIndex =
+                  Number(
+                    progress.session_index
+                  );
+
+                return (
+                  progressIndex === index ||
+                  progressIndex ===
+                    index + 1
+                );
+              }
+
+              return false;
+            }
+          );
+
+        if (
+          completed ||
+          plannedDistance <=
+            currentSafeLongRun
+        ) {
+          continue;
+        }
+
+        const ratio =
+          currentSafeLongRun /
+          plannedDistance;
+
+        await db
+          .prepare(
+            `update training_sessions
+             set distance_target = ?1,
+                 duration_target = ?2,
+                 main_set_text = ?3,
+                 estimated_load = ?4
+             where id = ?5`
+          )
+          .bind(
+            currentSafeLongRun,
+
+            estimateMinutes(
+              currentSafeLongRun,
+              session.session_type
+            ),
+
+            replaceTrainingKmText(
+              session.main_set_text,
+              currentSafeLongRun
+            ),
+
+            Number(
+              session.estimated_load ||
+                0
+            ) > 0
+              ? Math.max(
+                  1,
+                  Math.round(
+                    Number(
+                      session.estimated_load
+                    ) * ratio
+                  )
+                )
+              : session.estimated_load,
+
+            session.id
+          )
+          .run();
+
+        currentWeekSafetyAdjusted =
+          true;
+      }
+
+      if (
+        currentWeekSafetyAdjusted
+      ) {
+        const updatedTotal =
+          await db
+            .prepare(
+              `select
+                 coalesce(
+                   sum(
+                     coalesce(
+                       distance_target,
+                       0
+                     )
+                   ),
+                   0
+                 ) as total
+               from training_sessions
+               where training_week_id = ?1`
+            )
+            .bind(
+              currentWeek.id
+            )
+            .first<{
+              total: number;
+            }>();
+
+        await db
+          .prepare(
+            `update training_weeks
+             set total_target_distance = ?1
+             where id = ?2`
+          )
+          .bind(
+            roundToHalf(
+              Number(
+                updatedTotal?.total || 0
+              )
+            ),
+            currentWeek.id
+          )
+          .run();
+      }
+    }
+  }
+
+  /*
+   * Número REAL de semanas disponibles
+   * desde donde comenzará la transición
+   * hasta la carrera.
+   */
+  let transitionWeeksAvailable:
+    number | undefined =
+    undefined;
+
+  if (
+    shouldProgressiveRebase &&
+    input.eventDate
+  ) {
+    const transitionStart =
+      new Date(
+        `${plan.start_date}T00:00:00Z`
+      );
+
+    transitionStart.setUTCDate(
+      transitionStart.getUTCDate() +
+        (
+          regenerationStartWeek -
+          1
+        ) *
+          7
+    );
+
+    const eventDate =
+      new Date(
+        `${input.eventDate}T23:59:59Z`
+      );
+
+    const diffMs =
+      eventDate.getTime() -
+      transitionStart.getTime();
+
+    transitionWeeksAvailable =
+      Math.max(
+        1,
+        Math.min(
+          24,
+          Math.ceil(
+            diffMs /
+              (
+                1000 *
+                60 *
+                60 *
+                24 *
+                7
+              )
+          )
+        )
+      );
+  }
+
+
   /*
    * Crear nueva estructura sólo EN MEMORIA.
    */
@@ -3357,17 +4384,40 @@ async function refreshExistingPlanFromCurrentWeek(
           ),
   };
 
+  const planningInput:
+    AthleteProfileInput =
+    shouldProgressiveRebase
+      ? {
+          ...input,
+          currentVolumeKm:
+            baselineWeeklyVolumeKm,
+        }
+      : input;
+
   let generatedWeeks =
     buildPlanStructure(
-      input,
-      workoutLibrary
+      planningInput,
+      workoutLibrary,
+      shouldProgressiveRebase
+        ? transitionWeeksAvailable
+        : undefined
     );
 
   generatedWeeks =
     applyPreferredDaysToWeeks(
-      input,
+      planningInput,
       generatedWeeks
     );
+
+  if (shouldProgressiveRebase) {
+    generatedWeeks =
+      applySafeGoalProgression(
+        generatedWeeks,
+        baselineLongRunKm,
+        baselineWeeklyVolumeKm,
+        targetDistanceKm
+      );
+  }
 
   generatedWeeks =
     enrichPlanWithPaces(
@@ -3376,18 +4426,51 @@ async function refreshExistingPlanFromCurrentWeek(
     );
 
   /*
+   * Esta es la corrección principal:
+   *
+   * generated week 1
+   * NO significa week 1 del plan histórico.
+   *
+   * Se convierte en la primera semana
+   * cronológica que podemos modificar.
+   */
+  if (shouldProgressiveRebase) {
+    generatedWeeks =
+      generatedWeeks.map(
+        (
+          week: any,
+          index: number
+        ) => ({
+          ...week,
+
+          week_number:
+            regenerationStartWeek +
+            index,
+        })
+      );
+  }
+
+  /*
    * Procesamos únicamente semana actual y futuras.
    *
    * week 1 .. currentWeek-1:
    * NO SE TOCAN.
    */
-  const lastWeekNumber = Math.max(
-    existingWeeks.length,
-    generatedWeeks.length
-  );
+  const lastWeekNumber =
+    shouldProgressiveRebase
+      ? regenerationStartWeek +
+        generatedWeeks.length -
+        1
+      : Math.max(
+          existingWeeks.length,
+          generatedWeeks.length
+        );
 
   for (
-    let weekNumber = currentWeekNumber;
+    let weekNumber =
+      shouldProgressiveRebase
+        ? regenerationStartWeek
+        : currentWeekNumber;
     weekNumber <= lastWeekNumber;
     weekNumber++
   ) {
@@ -3582,7 +4665,9 @@ async function refreshExistingPlanFromCurrentWeek(
       isRecoverFitnessGoal(input.goal)
         ? `Plan actualizado para recuperar condición - ${input.level.trim()} - ${input.daysPerWeek} días/semana`
         : `Plan actualizado ${distanceLabel(distanceKm)} - ${input.goal.trim()} - ${input.daysPerWeek} días/semana`,
-      "profile_refresh_current_week",
+      shouldProgressiveRebase
+        ? "profile_refresh_safe_rebase_v1"
+        : "profile_refresh_current_week",
       plan.id
     )
     .run();
