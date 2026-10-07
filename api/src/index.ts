@@ -9754,7 +9754,7 @@ app.get("/api/version", (c) => {
     ok: true,
     api: "trainingapp-api",
     sessionProgressHandler: "v4-insert-ignore-update",
-    feasibilityEngine: "v1.1",
+    feasibilityEngine: "v1.2",
   });
 });
 

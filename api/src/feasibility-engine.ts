@@ -307,7 +307,18 @@ export function evaluateGoalFeasibility(
   // An athlete who ALREADY has an established base should not be automatically
   // classified as challenging merely because fewer build weeks remain.
   const minimumBuildWeeks = alreadyAtGuideline ? 2 : 4;
-  const adequateHistory = known.length >= 3 && completedRunWeeks >= 3;
+  const fullHistory =
+    known.length >= 3 &&
+    completedRunWeeks >= 3;
+
+  const partialHistoryUsable =
+    known.length >= 3 &&
+    completedRunWeeks >= 2 &&
+    distanceSamples.length >= 4;
+
+  const adequateHistory =
+    fullHistory ||
+    partialHistoryUsable;
   const highRecoveryRisk = (req.fatigueScore ?? 0) >= 4 || (req.sorenessScore ?? 0) >= 4 ||
     ((req.sleepQualityScore ?? 5) > 0 && (req.sleepQualityScore ?? 5) <= 2);
   if (highRecoveryRisk) outcome.reasons.push("El check-in reciente sugiere recuperación insuficiente; no se debe intensificar automáticamente.");
@@ -324,6 +335,8 @@ export function evaluateGoalFeasibility(
     // Missing runs may mean unsynchronized data, not necessarily insufficient fitness.
     // Do not assert physical unpreparedness from an incomplete history.
     outcome.status = "insufficient_data";
+  } else if (partialHistoryUsable && !fullHistory) {
+    outcome.status = "challenging";
   } else if (longRatio < 0.8 || volumeRatio < 0.7 || (adherence !== null && adherence < 0.5)) {
     outcome.status = "not_recommended";
   } else if (highRecoveryRisk || longRatio < 1 || volumeRatio < 1 || adherence === null || adherence < 0.75 || weeksAvailable < 1 + outcome.taperWeeks + minimumBuildWeeks) {
