@@ -1,5 +1,10 @@
 import { Hono } from "hono";
 import type { Context } from "hono";
+import {
+  evaluateGoalFeasibility,
+  type FeasibilityResult,
+  type TrainingWeekEvidence,
+} from "./feasibility-engine";
 
 type Bindings = {
   DB: D1Database;
@@ -5137,6 +5142,369 @@ function getTrainingPlanCalendar(
 }
 
 
+// TRAININGAPP_GOAL_FEASIBILITY_V1_1
+// Vista previa pura: consulta historial real y NO modifica D1.
+async function buildGoalFeasibilityAssessment(
+  db: D1Database,
+  userId: string,
+  input: AthleteProfileInput
+): Promise<FeasibilityResult | null> {
+  if (
+    isRecoverFitnessGoal(input.goal) ||
+    !String(input.eventDate || "").trim()
+  ) {
+    return null;
+  }
+
+  const targetDistanceKm =
+    normalizeDistance(input.distance);
+
+  if (![5, 10, 15, 21, 42].includes(targetDistanceKm)) {
+    return null;
+  }
+
+  const plan = await db
+    .prepare(
+      `select id, start_date, created_at
+       from training_plans
+       where user_id = ?1
+       order by created_at desc
+       limit 1`
+    )
+    .bind(userId)
+    .first<{
+      id: string;
+      start_date: string | null;
+      created_at: string;
+    }>();
+
+  // Primer plan: todavía no existe historial ligado a un plan.
+  // La factibilidad se activa al reconfigurar un plan existente.
+  if (!plan?.id || !plan.start_date) {
+    return null;
+  }
+
+  const anchorMonday =
+    getPlanAnchorMondayDayNumber(
+      plan.start_date
+    );
+
+  const logicalMonday =
+    getLogicalTrainingMondayDayNumber(
+      new Date()
+    );
+
+  const currentWeekNumber =
+    Math.max(
+      1,
+      Math.floor(
+        (
+          logicalMonday -
+          anchorMonday
+        ) / 7
+      ) + 1
+    );
+
+  const historicalWeekNumbers =
+    [4, 3, 2, 1]
+      .map(
+        (offset) =>
+          currentWeekNumber - offset
+      )
+      .filter(
+        (weekNumber) =>
+          weekNumber >= 1
+      );
+
+  const evidenceByWeek =
+    new Map<number, TrainingWeekEvidence>();
+
+  for (const weekNumber of historicalWeekNumbers) {
+    const range =
+      getTrainingWeekDateRange(
+        plan.start_date,
+        weekNumber
+      );
+
+    evidenceByWeek.set(
+      weekNumber,
+      {
+        weekStartDate:
+          range.weekStartDate,
+        completedRunDistancesKm: [],
+        plannedSessions: 0,
+        completedSessions: 0,
+      }
+    );
+  }
+
+  if (historicalWeekNumbers.length) {
+    const placeholders =
+      historicalWeekNumbers
+        .map(
+          (_, index) =>
+            `?${index + 2}`
+        )
+        .join(", ");
+
+    const plannedRows =
+      await db
+        .prepare(
+          `select
+             tw.week_number,
+             count(ts.id) as planned_sessions
+           from training_weeks tw
+           left join training_sessions ts
+             on ts.training_week_id = tw.id
+           where tw.training_plan_id = ?1
+             and tw.week_number in (${placeholders})
+           group by tw.week_number`
+        )
+        .bind(
+          plan.id,
+          ...historicalWeekNumbers
+        )
+        .all<any>();
+
+    for (
+      const row of
+        plannedRows.results || []
+    ) {
+      const weekNumber =
+        Number(row.week_number || 0);
+
+      const evidence =
+        evidenceByWeek.get(
+          weekNumber
+        );
+
+      if (evidence) {
+        evidence.plannedSessions =
+          Math.max(
+            0,
+            Number(
+              row.planned_sessions || 0
+            )
+          );
+      }
+    }
+
+    const progressPlaceholders =
+      historicalWeekNumbers
+        .map(
+          (_, index) =>
+            `?${index + 2}`
+        )
+        .join(", ");
+
+    const progressRows =
+      await db
+        .prepare(
+          `select
+             week_number,
+             is_completed,
+             actual_distance_km
+           from training_session_progress
+           where user_id = ?1
+             and week_number in (${progressPlaceholders})
+             and (
+               training_plan_id = ?${historicalWeekNumbers.length + 2}
+               or (
+                 training_plan_id is null
+                 and updated_at >= ?${historicalWeekNumbers.length + 3}
+               )
+             )
+           order by week_number asc, session_index asc`
+        )
+        .bind(
+          userId,
+          ...historicalWeekNumbers,
+          plan.id,
+          plan.created_at
+        )
+        .all<any>();
+
+    for (
+      const row of
+        progressRows.results || []
+    ) {
+      if (
+        Number(row.is_completed) !== 1
+      ) {
+        continue;
+      }
+
+      const weekNumber =
+        Number(row.week_number || 0);
+
+      const evidence =
+        evidenceByWeek.get(
+          weekNumber
+        );
+
+      if (!evidence) {
+        continue;
+      }
+
+      evidence.completedSessions =
+        Number(
+          evidence.completedSessions || 0
+        ) + 1;
+
+      const actualDistanceKm =
+        Number(
+          row.actual_distance_km || 0
+        );
+
+      // Nunca convertir distancia prescrita en distancia realizada.
+      if (
+        Number.isFinite(actualDistanceKm) &&
+        actualDistanceKm > 0 &&
+        actualDistanceKm < 150
+      ) {
+        evidence.completedRunDistancesKm.push(
+          actualDistanceKm
+        );
+      }
+    }
+  }
+
+  let latestCheckin: any = null;
+
+  try {
+    latestCheckin = await db
+      .prepare(
+        `select
+           fatigue_score,
+           soreness_score,
+           sleep_quality_score
+         from weekly_checkins
+         where user_id = ?1
+           and (
+             training_plan_id = ?2
+             or training_plan_id is null
+           )
+         order by created_at desc
+         limit 1`
+      )
+      .bind(
+        userId,
+        plan.id
+      )
+      .first<any>();
+  } catch {
+    latestCheckin = null;
+  }
+
+  // Si la semana actual ya tiene progreso, la transición comienza
+  // como mínimo en el siguiente lunes. Si no, el motor decide el
+  // primer lunes completo disponible usando el reloj del servidor.
+  const currentProgress = await db
+    .prepare(
+      `select count(*) as total
+       from training_session_progress
+       where user_id = ?1
+         and week_number = ?2
+         and (
+           training_plan_id = ?3
+           or (
+             training_plan_id is null
+             and updated_at >= ?4
+           )
+         )`
+    )
+    .bind(
+      userId,
+      currentWeekNumber,
+      plan.id,
+      plan.created_at
+    )
+    .first<{ total: number }>();
+
+  const currentWeekHasProgress =
+    Number(
+      currentProgress?.total || 0
+    ) > 0;
+
+  const transitionStartDate =
+    currentWeekHasProgress
+      ? formatTrainingDayNumber(
+          logicalMonday + 7
+        )
+      : undefined;
+
+  return evaluateGoalFeasibility({
+    targetDistanceKm:
+      targetDistanceKm as
+        | 5
+        | 10
+        | 15
+        | 21
+        | 42,
+
+    eventDate:
+      String(input.eventDate),
+
+    transitionStartDate,
+
+    // El producto actualmente usa Monterrey para su calendario.
+    // Cuando athlete_profiles tenga timezone propio, sustituir aquí.
+    athleteTimeZone:
+      "America/Monterrey",
+
+    weeks:
+      Array.from(
+        evidenceByWeek.values()
+      ),
+
+    fatigueScore:
+      latestCheckin
+        ? Number(
+            latestCheckin.fatigue_score || 0
+          )
+        : null,
+
+    sorenessScore:
+      latestCheckin
+        ? Number(
+            latestCheckin.soreness_score || 0
+          )
+        : null,
+
+    sleepQualityScore:
+      latestCheckin
+        ? Number(
+            latestCheckin.sleep_quality_score || 0
+          )
+        : null,
+  });
+}
+
+function getFeasibilityGate(
+  assessment: FeasibilityResult | null
+) {
+  if (!assessment) {
+    return {
+      required: false,
+      blocked: false,
+      requiresConfirmation: false,
+    };
+  }
+
+  return {
+    required: true,
+    blocked:
+      assessment.status ===
+        "not_recommended",
+    requiresConfirmation:
+      assessment.status ===
+        "challenging" ||
+      assessment.status ===
+        "insufficient_data",
+  };
+}
+
+
 // TRAININGAPP_ROLLING_PLAN_COVERAGE_V1
 //
 // Mantiene el plan vivo conforme avanza el calendario.
@@ -6992,10 +7360,82 @@ app.post("/api/paypal/bootstrap-plans", async (c) => {
   }
 });
 
+// TRAININGAPP_GOAL_FEASIBILITY_PREVIEW_V1_1
+app.post("/api/plan/feasibility-preview", async (c) => {
+  try {
+    const auth =
+      await requireAuthenticatedUser(c);
+
+    if (!auth) {
+      return jsonError(
+        c,
+        "No autenticado",
+        401
+      );
+    }
+
+    const body =
+      (await c.req.json()) as AthleteProfileInput;
+
+    validateProfile(body);
+
+    const allowed =
+      await validateDistanceForMembership(
+        c.env.DB,
+        auth.user.id,
+        body.distance
+      );
+
+    if (!allowed.ok) {
+      return c.json(
+        {
+          ok: false,
+          error: allowed.message,
+          planCode: allowed.planCode,
+          allowedDistances:
+            allowed.allowedDistances,
+        },
+        403
+      );
+    }
+
+    const assessment =
+      await buildGoalFeasibilityAssessment(
+        c.env.DB,
+        auth.user.id,
+        body
+      );
+
+    const gate =
+      getFeasibilityGate(
+        assessment
+      );
+
+    return c.json({
+      ok: true,
+      ...gate,
+      assessment,
+    });
+  } catch (error) {
+    return c.json(
+      {
+        ok: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : "No fue posible evaluar el objetivo",
+      },
+      500
+    );
+  }
+});
+
+
 app.post("/api/onboarding", async (c) => {
   try {
     const body = (await c.req.json()) as AthleteProfileInput & {
       userId?: string;
+      feasibilityConfirmed?: boolean;
     };
 
     validateProfile(body);
@@ -7032,6 +7472,59 @@ app.post("/api/onboarding", async (c) => {
           403
         );
       }
+    }
+
+    /*
+     * Recalcular factibilidad justo ANTES de persistir.
+     * El preview del navegador nunca es autoridad para guardar.
+     */
+    const feasibilityAssessment =
+      await buildGoalFeasibilityAssessment(
+        c.env.DB,
+        body.userId,
+        body
+      );
+
+    const feasibilityGate =
+      getFeasibilityGate(
+        feasibilityAssessment
+      );
+
+    if (
+      feasibilityGate.blocked &&
+      feasibilityAssessment
+    ) {
+      return c.json(
+        {
+          ok: false,
+          code:
+            "GOAL_NOT_RECOMMENDED",
+          error:
+            feasibilityAssessment.message,
+          assessment:
+            feasibilityAssessment,
+        },
+        409
+      );
+    }
+
+    if (
+      feasibilityGate.requiresConfirmation &&
+      !body.feasibilityConfirmed &&
+      feasibilityAssessment
+    ) {
+      return c.json(
+        {
+          ok: false,
+          code:
+            "FEASIBILITY_REVIEW_REQUIRED",
+          error:
+            feasibilityAssessment.message,
+          assessment:
+            feasibilityAssessment,
+        },
+        409
+      );
     }
 
     const existingProfile = await c.env.DB
@@ -9261,6 +9754,7 @@ app.get("/api/version", (c) => {
     ok: true,
     api: "trainingapp-api",
     sessionProgressHandler: "v4-insert-ignore-update",
+    feasibilityEngine: "v1.1",
   });
 });
 

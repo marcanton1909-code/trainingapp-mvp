@@ -165,6 +165,48 @@ type ManualSessionEntry = {
   missedAt?: string;
 };
 
+
+type FeasibilityStatus =
+  | "feasible"
+  | "challenging"
+  | "not_recommended"
+  | "insufficient_data";
+
+type FeasibilityAssessment = {
+  status: FeasibilityStatus;
+  confidence: "low" | "medium" | "high";
+  evaluatedOn: string;
+  athleteTimeZone: string;
+  daysUntilEvent: number;
+  fullWeeksRemaining: number;
+  extraDaysRemaining: number;
+  weeksAvailable: number;
+  buildWeeks: number;
+  taperWeeks: number;
+  baselineLongRunKm: number | null;
+  baselineWeeklyVolumeKm: number | null;
+  adherencePct: number | null;
+  projectedPeakLongRunKm: number | null;
+  projectedPeakWeeklyVolumeKm: number | null;
+  reasons: string[];
+  message: string;
+  requiresExplicitReview: boolean;
+};
+
+type RunnerProfilePayload = {
+  name: string;
+  email: string;
+  userId: string;
+  goal: string;
+  distance: string;
+  daysPerWeek: number;
+  preferredTrainingDays: string[];
+  level: string;
+  currentVolumeKm: number;
+  eventName: string;
+  eventDate: string;
+};
+
 type ManualMetrics = {
   totalSessions: number;
   completedSessions: number;
@@ -828,6 +870,16 @@ function getAiAdjustmentLabel(value: AiPlanReview["load_adjustment"]) {
   return "mantener";
 }
 
+
+function getFeasibilityStatusLabel(
+  status: FeasibilityStatus
+) {
+  if (status === "feasible") return "Factible";
+  if (status === "challenging") return "Exigente";
+  if (status === "not_recommended") return "No recomendado";
+  return "Datos insuficientes";
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<TabMode>("login");
   const [authLoading, setAuthLoading] = useState(true);
@@ -957,6 +1009,12 @@ export default function App() {
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState("");
   const [result, setResult] = useState("");
+  const [feasibilityPreview, setFeasibilityPreview] =
+    useState<FeasibilityAssessment | null>(null);
+  const [pendingGoalPayload, setPendingGoalPayload] =
+    useState<RunnerProfilePayload | null>(null);
+  const [feasibilityLoading, setFeasibilityLoading] =
+    useState(false);
 
   const [loading, setLoading] = useState(false);
   const [loginLoading, setLoginLoading] = useState(false);
@@ -1830,12 +1888,145 @@ async function fetchPlanSilently() {
     }
   }
 
+  async function saveRunnerProfileAndGoal(
+    payload: RunnerProfilePayload,
+    feasibilityConfirmed = false
+  ) {
+    const res = await fetch(
+      `${API_URL}/api/onboarding`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${authToken}`,
+        },
+        body: JSON.stringify({
+          ...payload,
+          feasibilityConfirmed,
+        }),
+      }
+    );
+
+    const data = await res.json();
+
+    if (!res.ok) {
+      if (
+        res.status === 409 &&
+        data?.assessment
+      ) {
+        setFeasibilityPreview(
+          data.assessment as FeasibilityAssessment
+        );
+        setPendingGoalPayload(payload);
+        return false;
+      }
+
+      throw new Error(
+        data?.error ||
+          "No fue posible guardar el perfil"
+      );
+    }
+
+    /*
+     * Si ya tiene un plan:
+     * actualizar EL MISMO PLAN desde
+     * la semana actual.
+     */
+    if (
+      hasActiveMembership &&
+      trainingPlan?.id
+    ) {
+      const refreshRes = await fetch(
+        `${API_URL}/api/plan/refresh-profile`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${authToken}`,
+          },
+          body: JSON.stringify(payload),
+        }
+      );
+
+      const refreshData =
+        await refreshRes.json();
+
+      if (!refreshRes.ok) {
+        throw new Error(
+          refreshData?.error ||
+            "El perfil se guardó, pero no fue posible actualizar el plan."
+        );
+      }
+
+      await fetchPlanSilently();
+
+      setActiveTab("plan");
+
+      setResult(
+        `Objetivo actualizado. Tu plan continúa en la semana ${
+          refreshData.currentWeekNumber || ""
+        } y las semanas anteriores se conservaron.`
+      );
+
+      return true;
+    }
+
+    if (hasActiveMembership) {
+      setResult(
+        "Perfil guardado. Ahora puedes generar tu primer plan."
+      );
+      return true;
+    }
+
+    setActiveTab("membership");
+
+    setResult(
+      "Perfil guardado. Activa una membresía para generar tu plan."
+    );
+
+    return true;
+  }
+
+  async function requestGoalFeasibility(
+    payload: RunnerProfilePayload
+  ) {
+    const previewRes = await fetch(
+      `${API_URL}/api/plan/feasibility-preview`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${authToken}`,
+        },
+        body: JSON.stringify(payload),
+      }
+    );
+
+    const previewData =
+      await previewRes.json();
+
+    if (!previewRes.ok) {
+      throw new Error(
+        previewData?.error ||
+          "No fue posible evaluar la factibilidad del objetivo."
+      );
+    }
+
+    return previewData as {
+      required: boolean;
+      blocked: boolean;
+      requiresConfirmation: boolean;
+      assessment: FeasibilityAssessment | null;
+    };
+  }
+
   async function handleOnboarding(e: FormEvent) {
     e.preventDefault();
 
-    if (!authUser) return;
+    if (!authUser || !authToken) return;
 
     setLoading(true);
+    setFeasibilityLoading(false);
     setResult("");
 
     try {
@@ -1845,9 +2036,10 @@ async function fetchPlanSilently() {
           form.daysPerWeek
         );
 
-      const payload = {
+      const payload: RunnerProfilePayload = {
         ...form,
-        daysPerWeek: preferredTrainingDays.length,
+        daysPerWeek:
+          preferredTrainingDays.length,
         preferredTrainingDays,
         name: authUser.name,
         email: authUser.email,
@@ -1855,97 +2047,82 @@ async function fetchPlanSilently() {
       };
 
       /*
-       * Guardar perfil y objetivo.
-       *
-       * Este endpoint NO genera un plan.
-       */
-      const res = await fetch(
-        `${API_URL}/api/onboarding`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify(payload),
-        }
-      );
-
-      const data = await res.json();
-
-      if (!res.ok) {
-        throw new Error(
-          data?.error ||
-            "No fue posible guardar el perfil"
-        );
-      }
-
-      /*
-       * Si ya tiene un plan:
-       * actualizar EL MISMO PLAN desde
-       * la semana actual.
+       * Factibilidad sólo cuando ya existe un plan
+       * y hay una fecha de carrera que evaluar.
+       * El endpoint es de solo lectura.
        */
       if (
         hasActiveMembership &&
-        trainingPlan?.id
+        trainingPlan?.id &&
+        form.goal !== "Recuperar condición" &&
+        Boolean(form.eventDate)
       ) {
-        const refreshRes = await fetch(
-          `${API_URL}/api/plan/refresh-profile`,
-          {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: `Bearer ${authToken}`,
-            },
-            body: JSON.stringify(payload),
-          }
-        );
+        setFeasibilityLoading(true);
 
-        const refreshData =
-          await refreshRes.json();
-
-        if (!refreshRes.ok) {
-          throw new Error(
-            refreshData?.error ||
-              "El perfil se guardó, pero no fue posible actualizar el plan."
+        const preview =
+          await requestGoalFeasibility(
+            payload
           );
+
+        setFeasibilityLoading(false);
+
+        if (
+          preview.required &&
+          preview.assessment
+        ) {
+          setFeasibilityPreview(
+            preview.assessment
+          );
+          setPendingGoalPayload(
+            payload
+          );
+          return;
         }
-
-        await fetchPlanSilently();
-
-
-        setActiveTab("plan");
-
-        setResult(
-          `Objetivo actualizado. Tu plan continúa en la semana ${
-            refreshData.currentWeekNumber || ""
-          } y las semanas anteriores se conservaron.`
-        );
-
-        return;
       }
 
-      /*
-       * Membresía activa pero todavía sin plan.
-       * Guardar objetivo NO genera uno automáticamente.
-       */
-      if (hasActiveMembership) {
-        setResult(
-          "Perfil guardado. Ahora puedes generar tu primer plan."
-        );
-        return;
-      }
-
-      setActiveTab("membership");
-
-      setResult(
-        "Perfil guardado. Activa una membresía para generar tu plan."
+      await saveRunnerProfileAndGoal(
+        payload,
+        false
       );
-
     } catch (error) {
       setResult(
         error instanceof Error
           ? error.message
           : "Error inesperado"
+      );
+    } finally {
+      setLoading(false);
+      setFeasibilityLoading(false);
+    }
+  }
+
+  async function confirmFeasibilityGoal() {
+    if (
+      !pendingGoalPayload ||
+      !authToken
+    ) {
+      return;
+    }
+
+    setLoading(true);
+    setResult("");
+
+    try {
+      const saved =
+        await saveRunnerProfileAndGoal(
+          pendingGoalPayload,
+          true
+        );
+
+      if (saved) {
+        setFeasibilityPreview(null);
+        setPendingGoalPayload(null);
+      }
+    } catch (error) {
+      setResult(
+        error instanceof Error
+          ? error.message
+          : "No fue posible guardar el objetivo"
       );
     } finally {
       setLoading(false);
@@ -2992,7 +3169,11 @@ async function fetchPlanSilently() {
 
                 <div className="button-row">
                   <button className="primary-button" disabled={loading}>
-                    {loading ? "Guardando..." : "Guardar objetivo"}
+                    {feasibilityLoading
+                      ? "Evaluando objetivo..."
+                      : loading
+                      ? "Guardando..."
+                      : "Guardar objetivo"}
                   </button>
 
                   {hasActiveMembership && !trainingPlan && (
@@ -4135,6 +4316,138 @@ async function fetchPlanSilently() {
             Mis datos
           </button>
         </nav>
+      )}
+
+      {feasibilityPreview && (
+        <div
+          className="modal-overlay"
+          onClick={() => {
+            if (!loading) {
+              setFeasibilityPreview(null);
+              setPendingGoalPayload(null);
+            }
+          }}
+        >
+          <div
+            className="modal"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="modal-header">
+              <div>
+                <span className="chip cyan">
+                  Factibilidad del objetivo
+                </span>
+                <h2>
+                  {getFeasibilityStatusLabel(
+                    feasibilityPreview.status
+                  )}
+                </h2>
+              </div>
+              <button
+                disabled={loading}
+                onClick={() => {
+                  setFeasibilityPreview(null);
+                  setPendingGoalPayload(null);
+                }}
+              >
+                ✕
+              </button>
+            </div>
+
+            <p className="modal-meta">
+              Evaluado el {feasibilityPreview.evaluatedOn}
+              {` · ${feasibilityPreview.daysUntilEvent} días para el evento`}
+            </p>
+
+            <p>{feasibilityPreview.message}</p>
+
+            <div className="metrics-grid">
+              <StatCard
+                label="Semanas completas"
+                value={String(
+                  feasibilityPreview.fullWeeksRemaining
+                )}
+              />
+              <StatCard
+                label="Construcción"
+                value={`${feasibilityPreview.buildWeeks} sem`}
+              />
+              <StatCard
+                label="Taper"
+                value={`${feasibilityPreview.taperWeeks} sem`}
+              />
+              <StatCard
+                label="Tirada reciente"
+                value={
+                  feasibilityPreview.baselineLongRunKm === null
+                    ? "Sin datos"
+                    : `${feasibilityPreview.baselineLongRunKm} km`
+                }
+              />
+              <StatCard
+                label="Volumen reciente"
+                value={
+                  feasibilityPreview.baselineWeeklyVolumeKm === null
+                    ? "Sin datos"
+                    : `${feasibilityPreview.baselineWeeklyVolumeKm} km/sem`
+                }
+              />
+              <StatCard
+                label="Pico proyectado"
+                value={
+                  feasibilityPreview.projectedPeakLongRunKm === null
+                    ? "Sin datos"
+                    : `${feasibilityPreview.projectedPeakLongRunKm} km`
+                }
+              />
+            </div>
+
+            {feasibilityPreview.reasons.length > 0 && (
+              <div className="notice">
+                <strong>Qué detectamos</strong>
+                <ul>
+                  {feasibilityPreview.reasons.map(
+                    (reason, index) => (
+                      <li key={`${index}-${reason}`}>
+                        {reason}
+                      </li>
+                    )
+                  )}
+                </ul>
+              </div>
+            )}
+
+            <div className="button-row">
+              <button
+                type="button"
+                className="ghost-button"
+                disabled={loading}
+                onClick={() => {
+                  setFeasibilityPreview(null);
+                  setPendingGoalPayload(null);
+                }}
+              >
+                Ajustar objetivo
+              </button>
+
+              {feasibilityPreview.status !==
+                "not_recommended" && (
+                <button
+                  type="button"
+                  className="primary-button"
+                  disabled={loading}
+                  onClick={confirmFeasibilityGoal}
+                >
+                  {loading
+                    ? "Guardando..."
+                    : feasibilityPreview.status === "feasible"
+                    ? "Continuar con objetivo"
+                    : "Entiendo y continuar"}
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
       )}
 
       {selectedSession && (
