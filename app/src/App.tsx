@@ -208,6 +208,38 @@ type OnboardingV2Form = {
   trainingNotes: string;
 };
 
+// TRAININGAPP_ONBOARDING_UI_HMS_V2_1
+// Keep backend/API contract in decimal minutes. UI accepts separate HH:MM:SS.
+type PbTimeParts = { hours: string; minutes: string; seconds: string };
+
+function pbMinutesToParts(totalMinutes: number | null | undefined): PbTimeParts {
+  if (typeof totalMinutes !== "number" || !Number.isFinite(totalMinutes) || totalMinutes <= 0) {
+    return { hours: "", minutes: "", seconds: "" };
+  }
+  const totalSeconds = Math.round(totalMinutes * 60);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  return {
+    hours: String(hours).padStart(2, "0"),
+    minutes: String(minutes).padStart(2, "0"),
+    seconds: String(seconds).padStart(2, "0"),
+  };
+}
+
+function pbPartsToMinutes(parts: PbTimeParts): number | null {
+  if (![parts.hours, parts.minutes, parts.seconds].some((part) => part !== "")) return null;
+  if (![parts.hours, parts.minutes, parts.seconds].every((part) => /^\d{0,2}$/.test(part))) return null;
+  const hours = Number(parts.hours || "0");
+  const minutes = Number(parts.minutes || "0");
+  const seconds = Number(parts.seconds || "0");
+  if (minutes >= 60 || seconds >= 60) return null;
+  const totalSeconds = hours * 3600 + minutes * 60 + seconds;
+  // Existing backend accepts up to 1,500 decimal minutes.
+  if (totalSeconds < 1 || totalSeconds > 1500 * 60) return null;
+  return totalSeconds / 60;
+}
+
 type RunnerProfilePayload = {
   name: string;
   email: string;
@@ -921,6 +953,9 @@ export default function App() {
   });
 
   const [onboardingStep, setOnboardingStep] = useState(1);
+  const [pbTimeParts, setPbTimeParts] = useState<PbTimeParts>({
+    hours: "", minutes: "", seconds: "",
+  });
   const [onboardingContext, setOnboardingContext] = useState<OnboardingV2Form>({
     weeklyMileageKm: [null, null, null, null],
     recentLongRunKm: null,
@@ -1744,6 +1779,8 @@ async function fetchPlanSilently() {
       const data = await response.json();
       if (response.ok && data.context) {
         setOnboardingContext((previous) => ({ ...previous, ...data.context }));
+        // Display previously saved decimal minutes as HH:MM:SS without losing seconds.
+        setPbTimeParts(pbMinutesToParts(data.context.recentPbMinutes ?? null));
       }
     } catch {
       // Remain compatible with users who have not yet filled out V2.
@@ -2085,6 +2122,17 @@ async function fetchPlanSilently() {
         !form.preferredTrainingDays.includes(onboardingContext.preferredLongRunDay)) {
       setResult("Selecciona el día de tirada larga entre tus días de entrenamiento.");
       setOnboardingStep(1);
+      return;
+    }
+    const pbHasInput = Object.values(pbTimeParts).some((part) => part !== "");
+    if (pbHasInput && pbPartsToMinutes(pbTimeParts) === null) {
+      setResult("Comprueba tu marca: horas de 0 a 25, minutos y segundos de 0 a 59.");
+      setOnboardingStep(2);
+      return;
+    }
+    if (pbHasInput && !onboardingContext.recentPbDistance) {
+      setResult("Selecciona la distancia de tu marca personal o deja el tiempo vacío.");
+      setOnboardingStep(2);
       return;
     }
     setLoading(true);
@@ -3033,19 +3081,6 @@ async function fetchPlanSilently() {
                       <select value={form.daysPerWeek} onChange={(e)=>setForm((p)=>({...p,daysPerWeek:Number(e.target.value)}))}>
                         {[3,4,5,6].map((n)=><option key={n} value={n}>{n} días</option>)}
                       </select>
-                      <div className="training-day-picker">
-                        {TRAINING_DAY_OPTIONS.map((day) => {
-                          const selected = form.preferredTrainingDays.includes(day);
-                          const full = form.preferredTrainingDays.length >= form.daysPerWeek;
-                          return <button key={day} type="button"
-                            className={selected ? "training-day-pill active":"training-day-pill"}
-                            disabled={!selected && full}
-                            onClick={()=>setForm((p)=>({...p, preferredTrainingDays: selected
-                              ? p.preferredTrainingDays.filter((item)=>item!==day)
-                              : [...p.preferredTrainingDays,day]}))}>{day.slice(0,3)}</button>;
-                        })}
-                      </div>
-                      <small>Selecciona {form.daysPerWeek} días; la tirada larga debe estar entre ellos.</small>
                     </Field>
                     <Field label="Día de tirada larga">
                       <select value={onboardingContext.preferredLongRunDay}
@@ -3055,6 +3090,22 @@ async function fetchPlanSilently() {
                       </select>
                     </Field>
                   </div>
+                  {/* Full-width row below both selects keeps their labels and controls aligned. */}
+                  <div className="training-day-picker" style={{marginTop:12}}>
+                    {TRAINING_DAY_OPTIONS.map((day) => {
+                      const selected = form.preferredTrainingDays.includes(day);
+                      const full = form.preferredTrainingDays.length >= form.daysPerWeek;
+                      return <button key={day} type="button"
+                        className={selected ? "training-day-pill active":"training-day-pill"}
+                        disabled={!selected && full}
+                        onClick={()=>setForm((p)=>({...p, preferredTrainingDays: selected
+                          ? p.preferredTrainingDays.filter((item)=>item!==day)
+                          : [...p.preferredTrainingDays,day]}))}>{day.slice(0,3)}</button>;
+                    })}
+                  </div>
+                  <small style={{display:"block",marginTop:8,marginBottom:14}}>
+                    Selecciona {form.daysPerWeek} días; la tirada larga debe estar entre ellos.
+                  </small>
                   <div className="two-col">
                     <Field label="Fecha de carrera">
                       <input type="date" disabled={form.goal === "Recuperar condición"} value={form.eventDate}
@@ -3108,11 +3159,32 @@ async function fetchPlanSilently() {
                         {["5K","10K","15K","21K","42K"].map((d)=><option key={d}>{d}</option>)}
                       </select>
                     </Field>
-                    <Field label="Tiempo de esa marca (minutos)">
-                      <input type="number" min={0} max={1500} step="0.1" placeholder="Ej. 54.5"
-                        value={onboardingContext.recentPbMinutes ?? ""}
-                        onChange={(e)=>setOnboardingContext((p)=>({...p,recentPbMinutes:e.target.value===""?null:Number(e.target.value)}))}/>
-                    </Field>
+                    <div className="field">
+                      <span>Tiempo de esa marca (hh:mm:ss)</span>
+                      <div role="group" aria-label="Tiempo de tu marca personal" style={{
+                        display:"grid", gridTemplateColumns:"repeat(3, minmax(0, 1fr))", gap:10
+                      }}>
+                        {(["hours", "minutes", "seconds"] as const).map((part, index) => (
+                          <div key={part} style={{minWidth:0}}>
+                            <input type="text" inputMode="numeric" maxLength={2}
+                              autoComplete="off"
+                              style={{width:"100%", minWidth:0, boxSizing:"border-box", textAlign:"center"}}
+                              placeholder={["HH", "MM", "SS"][index]}
+                              aria-label={["Horas", "Minutos", "Segundos"][index] + " de tu marca"}
+                              value={pbTimeParts[part]}
+                              onChange={(e)=>{
+                                const nextValue = e.target.value.replace(/\D/g, "").slice(0, 2);
+                                const nextParts = {...pbTimeParts, [part]: nextValue};
+                                setPbTimeParts(nextParts);
+                                setOnboardingContext((previous)=>({
+                                  ...previous, recentPbMinutes:pbPartsToMinutes(nextParts)
+                                }));
+                              }} />
+                          </div>
+                        ))}
+                      </div>
+                      <small>Ej. 01:45:30 (21K) · 04:12:15 (42K). Los campos vacíos equivalen a 00.</small>
+                    </div>
                   </div>
                 </div>
 
@@ -3172,6 +3244,15 @@ async function fetchPlanSilently() {
                       }
                       if (onboardingStep===1 && form.goal!=="Recuperar condición" && !form.distance) {
                         setResult("Selecciona la distancia antes de continuar.");return;
+                      }
+                      if (onboardingStep===2) {
+                        const entered = Object.values(pbTimeParts).some((part)=>part!=="");
+                        if (entered && pbPartsToMinutes(pbTimeParts) === null) {
+                          setResult("Marca personal inválida: comprueba las horas, minutos y segundos.");return;
+                        }
+                        if (entered && !onboardingContext.recentPbDistance) {
+                          setResult("Selecciona la distancia de esa marca o borra el tiempo.");return;
+                        }
                       }
                       setResult("");setOnboardingStep((step)=>step+1);
                     }}>Continuar</button>
