@@ -193,6 +193,21 @@ type FeasibilityAssessment = {
   requiresExplicitReview: boolean;
 };
 
+type OnboardingV2Form = {
+  weeklyMileageKm: Array<number | null>;
+  recentLongRunKm: number | null;
+  lastLongRunDate: string;
+  preferredLongRunDay: string;
+  maxSessionMinutes: number | null;
+  strengthDaysPerWeek: number;
+  strengthEquipment: string;
+  returningAfterBreak: boolean;
+  discomfortStatus: "no_response" | "no" | "yes";
+  recentPbDistance: string;
+  recentPbMinutes: number | null;
+  trainingNotes: string;
+};
+
 type RunnerProfilePayload = {
   name: string;
   email: string;
@@ -205,6 +220,7 @@ type RunnerProfilePayload = {
   currentVolumeKm: number;
   eventName: string;
   eventDate: string;
+  onboardingV2?: OnboardingV2Form;
 };
 
 type ManualMetrics = {
@@ -904,6 +920,21 @@ export default function App() {
     password: "",
   });
 
+  const [onboardingStep, setOnboardingStep] = useState(1);
+  const [onboardingContext, setOnboardingContext] = useState<OnboardingV2Form>({
+    weeklyMileageKm: [null, null, null, null],
+    recentLongRunKm: null,
+    lastLongRunDate: "",
+    preferredLongRunDay: "Domingo",
+    maxSessionMinutes: null,
+    strengthDaysPerWeek: 0,
+    strengthEquipment: "Ninguno",
+    returningAfterBreak: false,
+    discomfortStatus: "no_response",
+    recentPbDistance: "",
+    recentPbMinutes: null,
+    trainingNotes: "",
+  });
   const [form, setForm] = useState({
     name: "",
     email: "",
@@ -916,6 +947,11 @@ export default function App() {
     eventName: "",
     eventDate: "",
   });
+
+  // ONBOARDING_V2_CONTEXT_LOAD — restores own optional details after authentication.
+  useEffect(() => {
+    if (authToken) void fetchOnboardingContextSilently();
+  }, [authToken]);
 
   // RECOVER_FITNESS_UX_RESET_V1
   useEffect(() => {
@@ -1655,6 +1691,7 @@ async function fetchPlanSilently() {
         setTrainingPlan(data.plan || null);
         setWeeks(data.weeks || []);
         await fetchSessionProgressSilently(data.plan?.id || null);
+        if (onboardingStep === 1) await fetchOnboardingContextSilently();
 
         const savedDistance =
           normalizeDistance(data.runnerGoal?.target_distance) ||
@@ -1694,6 +1731,22 @@ async function fetchPlanSilently() {
       }
     } catch {
       // Sin bloquear UI
+    }
+  }
+
+  // ONBOARDING_V2_LOAD — optional legacy users have no context row.
+  async function fetchOnboardingContextSilently() {
+    if (!authToken) return;
+    try {
+      const response = await fetch(`${API_URL}/api/onboarding/context`, {
+        headers: { Authorization: `Bearer ${authToken}` },
+      });
+      const data = await response.json();
+      if (response.ok && data.context) {
+        setOnboardingContext((previous) => ({ ...previous, ...data.context }));
+      }
+    } catch {
+      // Remain compatible with users who have not yet filled out V2.
     }
   }
 
@@ -2024,7 +2077,16 @@ async function fetchPlanSilently() {
     e.preventDefault();
 
     if (!authUser || !authToken) return;
-
+    if (onboardingStep !== 3) {
+      setOnboardingStep((step) => Math.min(3, step + 1));
+      return;
+    }
+    if (onboardingContext.preferredLongRunDay &&
+        !form.preferredTrainingDays.includes(onboardingContext.preferredLongRunDay)) {
+      setResult("Selecciona el día de tirada larga entre tus días de entrenamiento.");
+      setOnboardingStep(1);
+      return;
+    }
     setLoading(true);
     setFeasibilityLoading(false);
     setResult("");
@@ -2044,6 +2106,7 @@ async function fetchPlanSilently() {
         name: authUser.name,
         email: authUser.email,
         userId: authUser.id,
+        onboardingV2: onboardingContext,
       };
 
       /*
@@ -2152,6 +2215,7 @@ async function fetchPlanSilently() {
     try {
       const payload = {
         ...form,
+        onboardingV2: onboardingContext,
         name: authUser.name,
         email: authUser.email,
         userId: authUser.id,
@@ -2934,257 +2998,189 @@ async function fetchPlanSilently() {
               <BetaBanner compact />
 
               <form className="form" onSubmit={handleOnboarding}>
-                <div className="two-col">
-                  <Field label="Nombre">
-                    <input value={authUser.name} disabled />
-                  </Field>
-                  <Field label="Correo">
-                    <input value={authUser.email} disabled />
-                  </Field>
+                <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:18}} aria-label="Progreso de configuración">
+                  {["1 · Objetivo", "2 · Tu base", "3 · Tu rutina"].map((label, index) => (
+                    <button type="button" key={label} onClick={() => setOnboardingStep(index+1)}
+                      className={onboardingStep === index+1 ? "primary-button" : "ghost-button"}
+                      style={{padding:"9px 14px",fontSize:13}}
+                      aria-current={onboardingStep === index+1 ? "step" : undefined}>{label}</button>
+                  ))}
                 </div>
 
-                <div className="two-col">
-                  <Field label="Objetivo">
-                    <select
-                      value={form.goal}
-                      onChange={(e) =>
-                        setForm((prev) => ({ ...prev, goal: e.target.value }))
-                      }
-                    >
-                      <option>Completar una carrera</option>
-                      <option>Mejorar tiempo</option>
-                      <option>Retomar constancia</option>
-                      <option>Recuperar condición</option>
+                <div style={{display: onboardingStep === 1 ? "block" : "none"}}>
+                  <div className="two-col">
+                    <Field label="Nombre"><input value={authUser.name} disabled /></Field>
+                    <Field label="Correo"><input value={authUser.email} disabled /></Field>
+                  </div>
+                  <div className="two-col">
+                    <Field label="Objetivo">
+                      <select value={form.goal} onChange={(e) => setForm((p) => ({...p,goal:e.target.value}))}>
+                        <option>Completar una carrera</option><option>Mejorar tiempo</option>
+                        <option>Retomar constancia</option><option>Recuperar condición</option>
+                      </select>
+                    </Field>
+                    <Field label="Distancia">
+                      <select value={form.distance || ""} disabled={form.goal === "Recuperar condición"}
+                        onChange={(e) => {setRunnerProfileDraftTouched(true);setForm((p)=>({...p,distance:e.target.value}));}}>
+                        <option value="">{form.goal === "Recuperar condición" ? "No aplica" : "Selecciona distancia"}</option>
+                        {form.goal !== "Recuperar condición" && allowedDistances.map((distance) =>
+                          <option key={distance} value={distance}>{distance}</option>)}
+                      </select>
+                    </Field>
+                  </div>
+                  <div className="two-col">
+                    <Field label="Días de entrenamiento">
+                      <select value={form.daysPerWeek} onChange={(e)=>setForm((p)=>({...p,daysPerWeek:Number(e.target.value)}))}>
+                        {[3,4,5,6].map((n)=><option key={n} value={n}>{n} días</option>)}
+                      </select>
+                      <div className="training-day-picker">
+                        {TRAINING_DAY_OPTIONS.map((day) => {
+                          const selected = form.preferredTrainingDays.includes(day);
+                          const full = form.preferredTrainingDays.length >= form.daysPerWeek;
+                          return <button key={day} type="button"
+                            className={selected ? "training-day-pill active":"training-day-pill"}
+                            disabled={!selected && full}
+                            onClick={()=>setForm((p)=>({...p, preferredTrainingDays: selected
+                              ? p.preferredTrainingDays.filter((item)=>item!==day)
+                              : [...p.preferredTrainingDays,day]}))}>{day.slice(0,3)}</button>;
+                        })}
+                      </div>
+                      <small>Selecciona {form.daysPerWeek} días; la tirada larga debe estar entre ellos.</small>
+                    </Field>
+                    <Field label="Día de tirada larga">
+                      <select value={onboardingContext.preferredLongRunDay}
+                        onChange={(e)=>setOnboardingContext((p)=>({...p,preferredLongRunDay:e.target.value}))}>
+                        <option value="">Sin preferencia</option>
+                        {form.preferredTrainingDays.map((day)=><option key={day} value={day}>{day}</option>)}
+                      </select>
+                    </Field>
+                  </div>
+                  <div className="two-col">
+                    <Field label="Fecha de carrera">
+                      <input type="date" disabled={form.goal === "Recuperar condición"} value={form.eventDate}
+                        onChange={(e)=>setForm((p)=>({...p,eventDate:e.target.value}))}/>
+                    </Field>
+                    <Field label="Nombre del evento (opcional)">
+                      <input value={form.eventName} onChange={(e)=>setForm((p)=>({...p,eventName:e.target.value}))}
+                        placeholder="Ej. Medio Maratón Monterrey" />
+                    </Field>
+                  </div>
+                </div>
+
+                <div style={{display: onboardingStep === 2 ? "block" : "none"}}>
+                  <p style={{opacity:0.85,marginTop:0}}>La información es declarada por ti. Cuando conectes actividades, usaremos primero los registros reales.</p>
+                  <div className="two-col">
+                    <Field label="Nivel percibido">
+                      <select value={form.level} onChange={(e)=>setForm((p)=>({...p,level:e.target.value}))}>
+                        <option>Principiante</option><option>Intermedio</option><option>Avanzado</option>
+                      </select>
+                    </Field>
+                    <Field label="Km semanales actuales (estimación)">
+                      <input type="number" min={0} max={250} value={form.currentVolumeKm}
+                        onChange={(e)=>setForm((p)=>({...p,currentVolumeKm:Number(e.target.value)}))} />
+                    </Field>
+                  </div>
+                  <p style={{marginBottom:8}}><strong>Km corridos por semana (últimas cuatro semanas completas)</strong> · opcional</p>
+                  <div className="two-col">
+                    {[0,1,2,3].map((index)=><Field key={index} label={`Hace ${4-index} semana(s)`}>
+                      <input type="number" min={0} max={250} step="0.5" placeholder="Sin dato"
+                        value={onboardingContext.weeklyMileageKm[index] ?? ""}
+                        onChange={(e)=>setOnboardingContext((p)=>({...p,weeklyMileageKm:p.weeklyMileageKm.map((v,i)=>i===index ? (e.target.value==="" ? null : Number(e.target.value)) : v)}))}/>
+                    </Field>)}
+                  </div>
+                  <small>Introduce 0 sólo si no corriste. Dejar vacío significa que no tienes el dato. Si llenas las cuatro semanas, usaremos su mediana como volumen declarado.</small>
+                  <div className="two-col">
+                    <Field label="Tirada larga más reciente (km)">
+                      <input type="number" min={0} max={100} step="0.5" placeholder="Opcional"
+                        value={onboardingContext.recentLongRunKm ?? ""}
+                        onChange={(e)=>setOnboardingContext((p)=>({...p,recentLongRunKm:e.target.value===""?null:Number(e.target.value)}))}/>
+                    </Field>
+                    <Field label="Fecha de esa tirada">
+                      <input type="date" value={onboardingContext.lastLongRunDate}
+                        onChange={(e)=>setOnboardingContext((p)=>({...p,lastLongRunDate:e.target.value}))}/>
+                    </Field>
+                  </div>
+                  <div className="two-col">
+                    <Field label="Última marca (opcional)">
+                      <select value={onboardingContext.recentPbDistance}
+                        onChange={(e)=>setOnboardingContext((p)=>({...p,recentPbDistance:e.target.value}))}>
+                        <option value="">Sin marca</option>
+                        {["5K","10K","15K","21K","42K"].map((d)=><option key={d}>{d}</option>)}
+                      </select>
+                    </Field>
+                    <Field label="Tiempo de esa marca (minutos)">
+                      <input type="number" min={0} max={1500} step="0.1" placeholder="Ej. 54.5"
+                        value={onboardingContext.recentPbMinutes ?? ""}
+                        onChange={(e)=>setOnboardingContext((p)=>({...p,recentPbMinutes:e.target.value===""?null:Number(e.target.value)}))}/>
+                    </Field>
+                  </div>
+                </div>
+
+                <div style={{display: onboardingStep === 3 ? "block" : "none"}}>
+                  <p style={{opacity:0.85,marginTop:0}}>Un par de detalles para acomodar mejor tu entrenamiento.</p>
+                  <div className="two-col">
+                    <Field label="Tiempo máximo habitual por sesión (min)">
+                      <input type="number" min={0} max={360} placeholder="Ej. 60 (opcional)"
+                        value={onboardingContext.maxSessionMinutes ?? ""}
+                        onChange={(e)=>setOnboardingContext((p)=>({...p,maxSessionMinutes:e.target.value===""?null:Number(e.target.value)}))}/>
+                    </Field>
+                    <Field label="Días de fuerza por semana">
+                      <select value={onboardingContext.strengthDaysPerWeek}
+                        onChange={(e)=>setOnboardingContext((p)=>({...p,strengthDaysPerWeek:Number(e.target.value)}))}>
+                        {[0,1,2,3,4,5,6,7].map((n)=><option value={n} key={n}>{n}</option>)}
+                      </select>
+                    </Field>
+                  </div>
+                  <div className="two-col">
+                    <Field label="Equipamiento para fuerza">
+                      <select value={onboardingContext.strengthEquipment}
+                        onChange={(e)=>setOnboardingContext((p)=>({...p,strengthEquipment:e.target.value}))}>
+                        <option>Ninguno</option><option>Casa</option><option>Gimnasio</option>
+                      </select>
+                    </Field>
+                    <Field label="¿Estás retomando tras una pausa?">
+                      <select value={onboardingContext.returningAfterBreak ? "yes" : "no"}
+                        onChange={(e)=>setOnboardingContext((p)=>({...p,returningAfterBreak:e.target.value==="yes"}))}>
+                        <option value="no">No</option><option value="yes">Sí</option>
+                      </select>
+                    </Field>
+                  </div>
+                  <Field label="¿Hay molestias actuales que limiten correr? (opcional)">
+                    <select value={onboardingContext.discomfortStatus}
+                      onChange={(e)=>setOnboardingContext((p)=>({...p,discomfortStatus:e.target.value as OnboardingV2Form["discomfortStatus"]}))}>
+                      <option value="no_response">Prefiero no responder</option>
+                      <option value="no">No</option>
+                      <option value="yes">Sí</option>
                     </select>
+                    <small>Opcional. No pedimos diagnósticos ni detalles médicos; se usa solamente para mostrar precauciones al evaluar la carga.</small>
                   </Field>
-
-                  <Field label="Distancia">
-
-                    <select
-
-                      value={form.distance || ""}
-
-                      disabled={form.goal === "Recuperar condición"}
-
-                      onChange={(e) =>
-
-                        setForm((prev) => ({
-
-                          ...prev,
-
-                          distance: e.target.value,
-
-                        }))
-
-                      }
-
-                    >
-
-                      <option value="">
-
-                        {form.goal === "Recuperar condición"
-
-                          ? "No aplica para este objetivo"
-
-                          : "Selecciona distancia"}
-
-                      </option>
-
-                      {form.goal !== "Recuperar condición" &&
-
-                        allowedDistances.map((distance) => (
-
-                          <option key={distance} value={distance}>
-
-                            {distance}
-
-                          </option>
-
-                        ))}
-
-                    </select>
-
+                  <Field label="Otras preferencias de disponibilidad (opcional)">
+                    <textarea maxLength={300} rows={3} value={onboardingContext.trainingNotes}
+                      placeholder="Ej. Sólo dispongo de 45 min entre semana. No incluyas información médica."
+                      onChange={(e)=>setOnboardingContext((p)=>({...p,trainingNotes:e.target.value}))}/>
                   </Field>
+                  <small>Los datos declarados ayudan a personalizar. Nunca sustituyen las actividades efectivamente completadas para validar objetivos.</small>
                 </div>
 
-                <div className="two-col">
-
-
-                  <Field label="Días de entrenamiento">
-
-                    <div className="training-day-picker">
-
-                      {TRAINING_DAY_OPTIONS.map((day) => {
-
-                        const selected = form.preferredTrainingDays.includes(day);
-
-                        const limitReached =
-
-                          form.preferredTrainingDays.length >= form.daysPerWeek;
-
-                        return (
-
-                          <button
-
-                            key={day}
-
-                            type="button"
-
-                            className={
-
-                              selected
-
-                                ? "training-day-pill active"
-
-                                : "training-day-pill"
-
-                            }
-
-                            onClick={() =>
-
-                              setForm((prev) => {
-
-                                const currentDays = Array.isArray(
-
-                                  prev.preferredTrainingDays
-
-                                )
-
-                                  ? prev.preferredTrainingDays
-
-                                  : [];
-
-                                if (currentDays.includes(day)) {
-
-                                  return {
-
-                                    ...prev,
-
-                                    preferredTrainingDays: currentDays.filter(
-
-                                      (item) => item !== day
-
-                                    ),
-
-                                  };
-
-                                }
-
-                                if (currentDays.length >= prev.daysPerWeek) {
-
-                                  return prev;
-
-                                }
-
-                                return {
-
-                                  ...prev,
-
-                                  preferredTrainingDays: [...currentDays, day],
-
-                                };
-
-                              })
-
-                            }
-
-                            disabled={!selected && limitReached}
-
-                          >
-
-                            {day.slice(0, 3)}
-
-                          </button>
-
-                        );
-
-                      })}
-
-                    </div>
-
-                    <small className="training-day-helper">
-
-                      Selecciona {form.daysPerWeek} días. El plan se asignará solo en esos días.
-
-                    </small>
-
-                  </Field>
-
-                  <Field label="Nivel">
-                    <select
-                      value={form.level}
-                      onChange={(e) =>
-                        setForm((prev) => ({ ...prev, level: e.target.value }))
+                <div className="button-row" style={{marginTop:20}}>
+                  {onboardingStep > 1 && <button type="button" className="ghost-button"
+                    onClick={()=>setOnboardingStep((step)=>step-1)}>Anterior</button>}
+                  {onboardingStep < 3 ?
+                    <button type="button" className="primary-button" onClick={()=>{
+                      if (onboardingStep===1 && !form.preferredTrainingDays.includes(onboardingContext.preferredLongRunDay) && onboardingContext.preferredLongRunDay) {
+                        setResult("Selecciona el día de tirada larga dentro de tus días de entrenamiento.");return;
                       }
-                    >
-                      <option>Principiante</option>
-                      <option>Intermedio</option>
-                      <option>Avanzado</option>
-                    </select>
-                  </Field>
-                </div>
-
-                <div className="two-col">
-                  <Field label="Volumen semanal actual km">
-                    <input
-                      type="number"
-                      min={0}
-                      value={form.currentVolumeKm}
-                      onChange={(e) =>
-                        setForm((prev) => ({
-                          ...prev,
-                          currentVolumeKm: Number(e.target.value),
-                        }))
+                      if (onboardingStep===1 && form.goal!=="Recuperar condición" && !form.distance) {
+                        setResult("Selecciona la distancia antes de continuar.");return;
                       }
-                    />
-                  </Field>
-
-                  <Field label="Fecha del evento">
-                    <input
-                      type="date"
-                      disabled={form.goal === "Recuperar condición"}
-                      value={form.eventDate}
-                      onChange={(e) =>
-                        setForm((prev) => ({
-                          ...prev,
-                          eventDate: e.target.value,
-                        }))
-                      }
-                    />
-                  </Field>
-                </div>
-
-                <Field label="Nombre del evento">
-                  <input
-                    value={form.eventName}
-                    onChange={(e) =>
-                      setForm((prev) => ({
-                        ...prev,
-                        eventName: e.target.value,
-                      }))
-                    }
-                    placeholder="Ej. 10K Monterrey, Medio Maratón CDMX..."
-                  />
-                </Field>
-
-                <div className="button-row">
-                  <button className="primary-button" disabled={loading}>
-                    {feasibilityLoading
-                      ? "Evaluando objetivo..."
-                      : loading
-                      ? "Guardando..."
-                      : "Guardar objetivo"}
-                  </button>
-
-                  {hasActiveMembership && !trainingPlan && (
-                    <button
-                      type="button"
-                      className="ghost-button"
-                      disabled={planLoading}
-                      onClick={generatePlan}
-                    >
-                      {planLoading ? "Generando..." : "Generar plan"}
-                    </button>
+                      setResult("");setOnboardingStep((step)=>step+1);
+                    }}>Continuar</button>
+                  : <button type="submit" className="primary-button" disabled={loading}>
+                      {feasibilityLoading ? "Evaluando objetivo...": loading ? "Guardando...":"Guardar perfil y objetivo"}
+                    </button>}
+                  {hasActiveMembership && !trainingPlan && onboardingStep===3 && (
+                    <button type="button" className="ghost-button" disabled={planLoading}
+                      onClick={generatePlan}>{planLoading?"Generando...":"Generar plan"}</button>
                   )}
                 </div>
               </form>

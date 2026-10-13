@@ -27,6 +27,22 @@ type Bindings = {
   CLOUDFLARE_AI_MODEL?: string;
 };
 
+// ONBOARDING_V2_CONTEXT — self-reported context, never completed training history.
+type OnboardingV2Context = {
+  weeklyMileageKm: Array<number | null>;
+  recentLongRunKm: number | null;
+  lastLongRunDate: string;
+  preferredLongRunDay: string;
+  maxSessionMinutes: number | null;
+  strengthDaysPerWeek: number;
+  strengthEquipment: string;
+  returningAfterBreak: boolean;
+  discomfortStatus: "no_response" | "no" | "yes";
+  recentPbDistance: string;
+  recentPbMinutes: number | null;
+  trainingNotes: string;
+};
+
 type AthleteProfileInput = {
   name: string;
   email: string;
@@ -39,6 +55,7 @@ type AthleteProfileInput = {
   eventName?: string;
   eventDate?: string;
   notes?: string;
+  onboardingV2?: OnboardingV2Context;
 };
 
 type SessionSeed = {
@@ -358,6 +375,76 @@ function determinePlanWeeks(distanceKm: number, eventDate?: string) {
   return Math.max(4, Math.min(defaultWeeks, eventWeeks));
 }
 
+// ONBOARDING_V2_VALIDATION — fail closed on malformed optional data.
+function parseOnboardingV2(value: unknown): OnboardingV2Context {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Los datos de entrenamiento del onboarding no son válidos.");
+  }
+  const x = value as Record<string, unknown>;
+  const numbers = x.weeklyMileageKm;
+  if (!Array.isArray(numbers) || numbers.length !== 4 || numbers.some(
+    (n) => n !== null && (typeof n !== "number" || !Number.isFinite(n) || n < 0 || n > 250)
+  )) throw new Error("Introduce cuatro semanas de km (0–250) o deja los campos vacíos.");
+  const optional = (v: unknown, max: number): number | null => {
+    if (v === null || v === undefined || v === "") return null;
+    if (typeof v !== "number" || !Number.isFinite(v) || v < 0 || v > max) {
+      throw new Error("Uno de los valores numéricos del perfil no es válido.");
+    }
+    return v;
+  };
+  const recentLongRunKm = optional(x.recentLongRunKm, 100);
+  const maxSessionMinutes = optional(x.maxSessionMinutes, 360);
+  const recentPbMinutes = optional(x.recentPbMinutes, 1500);
+  const day = String(x.preferredLongRunDay || "");
+  if (day && !TRAINING_DAY_ORDER.includes(day)) throw new Error("El día de tirada larga no es válido.");
+  const equipment = String(x.strengthEquipment || "");
+  if (!["", "Ninguno", "Casa", "Gimnasio"].includes(equipment)) throw new Error("El equipamiento no es válido.");
+  const discomfort = String(x.discomfortStatus || "no_response");
+  if (!["no_response", "no", "yes"].includes(discomfort)) throw new Error("La respuesta de molestias no es válida.");
+  const pb = String(x.recentPbDistance || "");
+  if (!["", "5K", "10K", "15K", "21K", "42K"].includes(pb)) throw new Error("La distancia de la marca personal no es válida.");
+  const days = Number(x.strengthDaysPerWeek ?? 0);
+  if (!Number.isInteger(days) || days < 0 || days > 7) throw new Error("Los días de fuerza no son válidos.");
+  const date = String(x.lastLongRunDate || "");
+  if (date && !/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error("La fecha de tirada larga no es válida.");
+  const trainingNotes = String(x.trainingNotes || "").trim();
+  if (trainingNotes.length > 300) throw new Error("Las notas no pueden exceder 300 caracteres.");
+  return {
+    weeklyMileageKm: numbers as Array<number | null>,
+    recentLongRunKm, lastLongRunDate: date, preferredLongRunDay: day,
+    maxSessionMinutes, strengthDaysPerWeek: days, strengthEquipment: equipment,
+    returningAfterBreak: x.returningAfterBreak === true,
+    discomfortStatus: discomfort as "no_response" | "no" | "yes",
+    recentPbDistance: pb, recentPbMinutes, trainingNotes,
+  };
+}
+
+function readOnboardingContext(db: D1Database, userId: string): Promise<OnboardingV2Context | null> {
+  return db.prepare(
+    "select context_json from athlete_onboarding_context where user_id = ?1 limit 1"
+  ).bind(userId).first<{ context_json: string }>().then((row) => {
+    if (!row?.context_json) return null;
+    try { return parseOnboardingV2(JSON.parse(row.context_json)); } catch { return null; }
+  });
+}
+
+function onboardingContextWrite(db: D1Database, userId: string, context: OnboardingV2Context, updatedAt: string) {
+  return db.prepare(`insert into athlete_onboarding_context (user_id, context_json, updated_at)
+     values (?1, ?2, ?3)
+     on conflict(user_id) do update set context_json = excluded.context_json, updated_at = excluded.updated_at`)
+     .bind(userId, JSON.stringify(context), updatedAt);
+}
+
+// Self-reported weeks inform declared baseline only; they are NOT completed sessions.
+function effectiveDeclaredWeeklyVolume(input: AthleteProfileInput): number {
+  const samples = input.onboardingV2?.weeklyMileageKm || [];
+  if (samples.length === 4 && samples.every((v) => v !== null && typeof v === "number")) {
+    const sorted = [...samples].map(Number).sort((a,b) => a-b);
+    return roundToHalf((sorted[1] + sorted[2]) / 2);
+  }
+  return input.currentVolumeKm;
+}
+
 function validateProfile(body: AthleteProfileInput) {
   if (!body.name?.trim()) throw new Error("El nombre es obligatorio");
   if (!body.email?.trim()) throw new Error("El correo es obligatorio");
@@ -374,8 +461,16 @@ function validateProfile(body: AthleteProfileInput) {
     throw new Error("Los días por semana deben estar entre 1 y 7");
   }
   if (!body.level?.trim()) throw new Error("El nivel es obligatorio");
-  if (!Number.isFinite(body.currentVolumeKm) || body.currentVolumeKm < 0) {
-    throw new Error("El volumen actual debe ser 0 o mayor");
+  if (!Number.isFinite(body.currentVolumeKm) || body.currentVolumeKm < 0 || body.currentVolumeKm > 250) {
+    throw new Error("El volumen actual debe estar entre 0 y 250 km");
+  }
+  if (body.onboardingV2 !== undefined) {
+    body.onboardingV2 = parseOnboardingV2(body.onboardingV2);
+    const day = body.onboardingV2.preferredLongRunDay;
+    if (day && !normalizePreferredTrainingDays(body.preferredTrainingDays, body.daysPerWeek).includes(day)) {
+      throw new Error("El día de tirada larga debe estar entre tus días seleccionados.");
+    }
+    body.currentVolumeKm = effectiveDeclaredWeeklyVolume(body);
   }
 }
 
@@ -538,7 +633,18 @@ function getLongRunTarget(input: AthleteProfileInput, weekNumber: number, totalW
   }
 
   const maxByWeeklyVolume = weeklyVolume * (distanceKm >= 21 ? 0.42 : 0.36);
-  return roundToHalf(clamp(longRun, 3.5, Math.min(config.longRunPeak, maxByWeeklyVolume)));
+  let target = roundToHalf(clamp(longRun, 3.5, Math.min(config.longRunPeak, maxByWeeklyVolume)));
+  // A recent self-reported long run is a conservative ceiling, not proof of completion.
+  const v2 = input.onboardingV2;
+  if (v2 && v2.recentLongRunKm !== null && v2.recentLongRunKm > 0 && v2.lastLongRunDate) {
+    const ageDays = Math.floor((Date.now() - new Date(v2.lastLongRunDate + "T00:00:00Z").getTime()) / 86400000);
+    if (Number.isFinite(ageDays) && ageDays >= 0 && ageDays <= 42) {
+      const initial = Math.max(3.5, v2.recentLongRunKm);
+      const increase = Math.min(1.5, initial * 0.12);
+      target = Math.min(target, roundToHalf(initial + increase * weekNumber));
+    }
+  }
+  return target;
 }
 
 function normalizeWorkoutLibraryLevel(level: string) {
@@ -1175,13 +1281,23 @@ function applyPreferredTrainingDaysToSessions<T extends { day_of_week?: string }
 
   );
 
-  return sessions.map((session, index) => ({
-
+  const mapped = sessions.map((session, index) => ({
     ...session,
-
     day_of_week: preferredDays[index % preferredDays.length] || session.day_of_week,
-
   }));
+  const requested = (input as AthleteProfileInput).onboardingV2?.preferredLongRunDay;
+  if (requested && preferredDays.includes(requested)) {
+    const longRunIndex = mapped.findIndex((session: any) =>
+      String(session.session_type || "").toLowerCase().includes("long")
+    );
+    const swapIndex = mapped.findIndex((session) => session.day_of_week === requested);
+    if (longRunIndex >= 0 && swapIndex >= 0 && longRunIndex !== swapIndex) {
+      const priorDay = mapped[longRunIndex].day_of_week;
+      mapped[longRunIndex].day_of_week = requested;
+      mapped[swapIndex].day_of_week = priorDay;
+    }
+  }
+  return mapped;
 
 }
 
@@ -5433,7 +5549,7 @@ async function buildGoalFeasibilityAssessment(
         )
       : undefined;
 
-  return evaluateGoalFeasibility({
+  const assessment = evaluateGoalFeasibility({
     targetDistanceKm:
       targetDistanceKm as
         | 5
@@ -5478,6 +5594,38 @@ async function buildGoalFeasibilityAssessment(
           )
         : null,
   });
+
+  // Availability is a genuine constraint, but self-report never counts as a completed run.
+  // Apply only a restrictive warning; do not silently upgrade feasibility.
+  const context = input.onboardingV2 || await readOnboardingContext(db, userId);
+  if (context?.maxSessionMinutes && context.maxSessionMinutes < 60 && targetDistanceKm >= 21) {
+    assessment.reasons.push(
+      `Disponibilidad habitual: ${context.maxSessionMinutes} min por sesión. Revisa si tendrás tiempo para la tirada larga.`
+    );
+    if (assessment.status === "feasible") {
+      assessment.status = "challenging";
+      assessment.confidence = "medium";
+      assessment.requiresExplicitReview = true;
+      assessment.message = "Objetivo exigente: revisa el tiempo disponible para las tiradas largas.";
+    }
+  }
+  if (context?.returningAfterBreak) {
+    assessment.reasons.push("Indicas que regresas de una pausa: prioriza consolidar una base antes de aumentar carga.");
+    if (assessment.status === "feasible") {
+      assessment.status = "challenging";
+      assessment.requiresExplicitReview = true;
+      assessment.message = "Objetivo exigente: el regreso después de una pausa requiere progresión conservadora.";
+    }
+  }
+  if (context?.discomfortStatus === "yes") {
+    assessment.reasons.push("Declaraste molestias que limitan correr: no aumentes carga automáticamente y considera orientación profesional.");
+    if (assessment.status === "feasible") {
+      assessment.status = "challenging";
+      assessment.requiresExplicitReview = true;
+      assessment.message = "Objetivo exigente: las molestias declaradas requieren cautela.";
+    }
+  }
+  return assessment;
 }
 
 function getFeasibilityGate(
@@ -6114,6 +6262,7 @@ async function ensurePlanForUser(
     notes: profile.notes || "",
   };
 
+  input.onboardingV2 = await readOnboardingContext(db, userId) || undefined;
   const createdPlan = await createTrainingPlanForUser(db, userId, input, aiEnv);
 
   return {
@@ -7431,8 +7580,22 @@ app.post("/api/plan/feasibility-preview", async (c) => {
 });
 
 
+// ONBOARDING_V2_GET — read own optional context only.
+app.get("/api/onboarding/context", async (c) => {
+  try {
+    const auth = await requireAuthenticatedUser(c);
+    if (!auth) return jsonError(c, "No autenticado", 401);
+    const context = await readOnboardingContext(c.env.DB, auth.user.id);
+    return c.json({ ok: true, context });
+  } catch (error) {
+    return c.json({ ok: false, error: "No se pudo recuperar el contexto de entrenamiento. Comprueba la migración V2." }, 500);
+  }
+});
+
 app.post("/api/onboarding", async (c) => {
   try {
+    const auth = await requireAuthenticatedUser(c);
+    if (!auth) return jsonError(c, "No autenticado", 401);
     const body = (await c.req.json()) as AthleteProfileInput & {
       userId?: string;
       feasibilityConfirmed?: boolean;
@@ -7440,9 +7603,10 @@ app.post("/api/onboarding", async (c) => {
 
     validateProfile(body);
 
-    if (!body.userId?.trim()) {
-      return jsonError(c, "El userId es obligatorio");
+    if (!body.userId?.trim() || body.userId !== auth.user.id) {
+      return jsonError(c, "No puedes modificar el perfil de otro usuario.", 403);
     }
+    const v2Context = body.onboardingV2;
 
     const existingUser = await c.env.DB
       .prepare(`select id from users where id = ?1 limit 1`)
@@ -7614,6 +7778,7 @@ app.post("/api/onboarding", async (c) => {
         );
       }
 
+      if (v2Context) batch.push(onboardingContextWrite(c.env.DB, body.userId, v2Context, createdAt));
       await c.env.DB.batch(batch);
 
       return c.json({
@@ -7627,7 +7792,7 @@ app.post("/api/onboarding", async (c) => {
     const profileId = crypto.randomUUID();
     const goalId = crypto.randomUUID();
 
-    await c.env.DB.batch([
+    const createBatch = [
       c.env.DB
         .prepare(
           `update users
@@ -7675,7 +7840,9 @@ app.post("/api/onboarding", async (c) => {
           body.eventDate?.trim() || null,
           createdAt
         ),
-    ]);
+    ];
+    if (v2Context) createBatch.push(onboardingContextWrite(c.env.DB, body.userId, v2Context, createdAt));
+    await c.env.DB.batch(createBatch);
 
     return c.json({
       ok: true,
@@ -9755,6 +9922,7 @@ app.get("/api/version", (c) => {
     api: "trainingapp-api",
     sessionProgressHandler: "v4-insert-ignore-update",
     feasibilityEngine: "v1.2",
+    onboarding: "v2",
   });
 });
 
